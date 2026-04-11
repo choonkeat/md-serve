@@ -39,6 +39,9 @@ var assetsFS embed.FS
 // to collide with anything a user might have on disk.
 const assetsPrefix = "/_md-serve-assets/"
 
+// Endpoint used by injected -live JS to poll for source-file changes.
+const livereloadPath = "/_md-serve-livereload"
+
 var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -49,12 +52,35 @@ var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
 <style>
   body { box-sizing: border-box; min-width: 200px; max-width: 980px; margin: 0 auto; padding: 45px; }
   @media (max-width: 767px) { body { padding: 15px; } }
+  /* Directory listing: full-width table that wraps the name column and
+     keeps the Size/Modified columns on a single line, so it stays
+     readable on mobile and matches the document width on desktop. */
+  .markdown-body table.md-serve-listing { display: table; width: 100%; }
+  .markdown-body table.md-serve-listing td:first-child { word-break: break-word; }
+  .markdown-body table.md-serve-listing th:nth-child(n+2),
+  .markdown-body table.md-serve-listing td:nth-child(n+2) { white-space: nowrap; }
+  .markdown-body p.md-serve-readme-source { margin: 16px 0 8px 0; font-size: 13px; color: #57606a; }
 </style>
 </head>
 <body>
 <article class="markdown-body">
 {{.Body}}
 </article>
+{{if .LiveReload}}<script>
+(function(){
+  var last=null;
+  setInterval(function(){
+    fetch('/_md-serve-livereload?path='+encodeURIComponent(location.pathname),{cache:'no-store'})
+      .then(function(r){return r.ok?r.text():null;})
+      .then(function(t){
+        if(t==null) return;
+        if(last==null){last=t;return;}
+        if(t!==last) location.reload();
+      })
+      .catch(function(){});
+  }, 1000);
+})();
+</script>{{end}}
 </body>
 </html>
 `))
@@ -63,6 +89,7 @@ type pageData struct {
 	Title        string
 	Body         template.HTML
 	AssetsPrefix string
+	LiveReload   bool
 }
 
 func main() {
@@ -75,6 +102,7 @@ func main() {
 	var (
 		addr    = flag.String("addr", defaultAddr, "address to listen on (defaults to :$PORT if set, else :8080)")
 		dir     = flag.String("dir", ".", "directory to serve")
+		live    = flag.Bool("live", false, "inject a small JS poller that auto-reloads pages when their source file changes (dev only)")
 		showVer = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Usage = func() {
@@ -103,12 +131,20 @@ func main() {
 		goldmark.WithRendererOptions(gmhtml.WithUnsafe()),
 	)
 
+	h := &fileHandler{root: root, md: md, live: *live}
 	mux := http.NewServeMux()
 	mux.Handle(assetsPrefix, http.StripPrefix(assetsPrefix, http.FileServerFS(mustSub(assetsFS, "assets"))))
-	mux.Handle("/", &fileHandler{root: root, md: md})
+	if *live {
+		mux.HandleFunc(livereloadPath, h.livereload)
+	}
+	mux.Handle("/", h)
 
 	srv := &http.Server{Addr: *addr, Handler: logMiddleware(mux)}
-	log.Printf("md-serve %s (%s) serving %s on http://%s", version, commit, root, *addr)
+	liveSuffix := ""
+	if *live {
+		liveSuffix = " [live-reload]"
+	}
+	log.Printf("md-serve %s (%s) serving %s on http://%s%s", version, commit, root, *addr, liveSuffix)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("md-serve: listen: %v", err)
 	}
@@ -125,6 +161,7 @@ func mustSub(f embed.FS, dir string) fs.FS {
 type fileHandler struct {
 	root string
 	md   goldmark.Markdown
+	live bool
 }
 
 func (h *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -200,6 +237,7 @@ func (h *fileHandler) serveFile(w http.ResponseWriter, r *http.Request, fsPath, 
 			Title:        title,
 			Body:         template.HTML(buf.String()),
 			AssetsPrefix: assetsPrefix,
+			LiveReload:   h.live,
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := pageTpl.Execute(w, data); err != nil {
@@ -210,10 +248,10 @@ func (h *fileHandler) serveFile(w http.ResponseWriter, r *http.Request, fsPath, 
 	http.ServeFile(w, r, fsPath)
 }
 
-// listingHTML builds a rendered <ul> of the directory contents as a
-// markdown-body HTML fragment. Includes a parent "../" link when urlPath
-// is not the root. Dotfiles are skipped. Directories are sorted before
-// files; within each group, alphabetically.
+// listingHTML builds an HTML <table> of the directory contents as a
+// markdown-body fragment with Name / Size / Modified columns. Includes a
+// parent "../" link when urlPath is not the root. Dotfiles are skipped.
+// Directories are sorted before files; within each group, alphabetically.
 func (h *fileHandler) listingHTML(fsPath, urlPath string) (template.HTML, error) {
 	entries, err := os.ReadDir(fsPath)
 	if err != nil {
@@ -226,9 +264,13 @@ func (h *fileHandler) listingHTML(fsPath, urlPath string) (template.HTML, error)
 		}
 		return entries[i].Name() < entries[j].Name()
 	})
-	var md strings.Builder
+	var b strings.Builder
+	b.WriteString(`<table class="md-serve-listing">
+<thead><tr><th>Name</th><th style="text-align:right">Size</th><th>Modified</th></tr></thead>
+<tbody>
+`)
 	if urlPath != "/" {
-		md.WriteString("- [../](../)\n")
+		b.WriteString(`<tr><td><a href="../">../</a></td><td></td><td></td></tr>` + "\n")
 	}
 	for _, e := range entries {
 		name := e.Name()
@@ -237,17 +279,43 @@ func (h *fileHandler) listingHTML(fsPath, urlPath string) (template.HTML, error)
 		}
 		display := name
 		link := name
+		size := ""
+		modified := ""
+		if info, err := e.Info(); err == nil {
+			modified = info.ModTime().Local().Format("2006-01-02 15:04")
+			if !e.IsDir() {
+				size = humanSize(info.Size())
+			}
+		}
 		if e.IsDir() {
 			display += "/"
 			link += "/"
 		}
-		fmt.Fprintf(&md, "- [%s](%s)\n", display, link)
+		fmt.Fprintf(&b,
+			`<tr><td><a href="%s">%s</a></td><td style="text-align:right">%s</td><td>%s</td></tr>`+"\n",
+			html.EscapeString(link),
+			html.EscapeString(display),
+			html.EscapeString(size),
+			html.EscapeString(modified),
+		)
 	}
-	var buf bytes.Buffer
-	if err := h.md.Convert([]byte(md.String()), &buf); err != nil {
-		return "", err
+	b.WriteString("</tbody></table>\n")
+	return template.HTML(b.String()), nil
+}
+
+// humanSize formats a byte count using binary (KiB/MiB/...) units, with
+// no decimals for plain bytes and one decimal otherwise.
+func humanSize(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
 	}
-	return template.HTML(buf.String()), nil
+	div, exp := int64(unit), 0
+	for x := n / unit; x >= unit; x /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 func (h *fileHandler) serveDirIndex(w http.ResponseWriter, r *http.Request, fsPath, urlPath string) {
@@ -262,6 +330,7 @@ func (h *fileHandler) serveDirIndex(w http.ResponseWriter, r *http.Request, fsPa
 		Title:        "Index of " + urlPath,
 		Body:         template.HTML(body),
 		AssetsPrefix: assetsPrefix,
+		LiveReload:   h.live,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = pageTpl.Execute(w, data)
@@ -287,20 +356,69 @@ func (h *fileHandler) serveCombinedDir(w http.ResponseWriter, r *http.Request, f
 		return
 	}
 	// Listing block labelled with the current path, then a horizontal rule,
-	// then the rendered README.
+	// then a small label naming the README file we picked, then its
+	// rendered content. The label is a link to the file itself so the user
+	// can open it on its own page.
+	readmeName := filepath.Base(readmePath)
 	body := fmt.Sprintf(
-		`<h2 id="md-serve-dir-listing" style="margin-top:0">Files in %s</h2>%s<hr>%s`,
+		`<h2 id="md-serve-dir-listing" style="margin-top:0">Files in %s</h2>%s<hr><p class="md-serve-readme-source"><a href="%s">%s</a></p>%s`,
 		html.EscapeString(urlPath),
 		string(listing),
+		html.EscapeString(readmeName),
+		html.EscapeString(readmeName),
 		readme.String(),
 	)
 	data := pageData{
-		Title:        filepath.Base(readmePath) + " — " + urlPath,
+		Title:        readmeName + " — " + urlPath,
 		Body:         template.HTML(body),
 		AssetsPrefix: assetsPrefix,
+		LiveReload:   h.live,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = pageTpl.Execute(w, data)
+}
+
+// livereload returns the source-file mtime (as Unix nanos) for the page
+// at ?path=<url-path>, so the injected -live JS can poll and reload when
+// the value changes. For directories the result is the max mtime across
+// the dir itself and its immediate non-dotfile entries — that's enough
+// to catch both content edits to the rendered README and add/remove of
+// files in the listing.
+func (h *fileHandler) livereload(w http.ResponseWriter, r *http.Request) {
+	urlPath := r.URL.Query().Get("path")
+	if urlPath == "" {
+		http.Error(w, "path required", http.StatusBadRequest)
+		return
+	}
+	cleaned := path.Clean("/" + urlPath)
+	fsPath, ok := safeJoin(h.root, cleaned)
+	if !ok {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	info, err := os.Stat(fsPath)
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	mtime := info.ModTime().UnixNano()
+	if info.IsDir() {
+		if entries, err := os.ReadDir(fsPath); err == nil {
+			for _, e := range entries {
+				if strings.HasPrefix(e.Name(), ".") {
+					continue
+				}
+				if i, err := e.Info(); err == nil {
+					if t := i.ModTime().UnixNano(); t > mtime {
+						mtime = t
+					}
+				}
+			}
+		}
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprintf(w, "%d", mtime)
 }
 
 // safeJoin joins root with urlPath (already cleaned, starts with "/") and
