@@ -325,26 +325,29 @@ func (h *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // serveDir implements the directory-handling rules:
 //
-//  1. If a markdown index is present (index.md / README.md / readme.md /
-//     index.markdown), render a GitHub-style combined page with the
-//     directory listing at the top and the rendered README below.
-//  2. Else if an index.html is present, serve it raw via http.ServeFile
-//     so the user's own HTML is delivered byte-for-byte.
+//  1. If an index.html is present, serve it raw via http.ServeFile so
+//     the user's own HTML is delivered byte-for-byte. This matches
+//     nginx, Apache, Caddy, GitHub Pages, and every CDN — index.html
+//     wins at directory roots so md-serve can host real static apps.
+//  2. Else if a markdown index is present (index.md / README.md /
+//     readme.md / index.markdown), render a GitHub-style combined page
+//     with the directory listing at the top and the rendered README
+//     below.
 //  3. Else, serve the auto-generated directory listing.
 func (h *fileHandler) serveDir(w http.ResponseWriter, r *http.Request, fsPath, urlPath string) {
-	// 1. Markdown index → combined page
+	// 1. index.html → raw pass-through (matches every other static host)
+	indexHTML := filepath.Join(fsPath, "index.html")
+	if s, err := os.Stat(indexHTML); err == nil && !s.IsDir() {
+		http.ServeFile(w, r, indexHTML)
+		return
+	}
+	// 2. Markdown index → combined page
 	for _, name := range []string{"index.md", "README.md", "readme.md", "index.markdown"} {
 		p := filepath.Join(fsPath, name)
 		if s, err := os.Stat(p); err == nil && !s.IsDir() {
 			h.serveCombinedDir(w, r, fsPath, urlPath, p)
 			return
 		}
-	}
-	// 2. index.html → raw pass-through
-	indexHTML := filepath.Join(fsPath, "index.html")
-	if s, err := os.Stat(indexHTML); err == nil && !s.IsDir() {
-		http.ServeFile(w, r, indexHTML)
-		return
 	}
 	// 3. Generated listing
 	h.serveDirIndex(w, r, fsPath, urlPath)
@@ -383,10 +386,16 @@ func (h *fileHandler) serveFile(w http.ResponseWriter, r *http.Request, fsPath, 
 		http.ServeFile(w, r, fsPath)
 		return
 	}
-	// Source-code highlighting branch: opt-out via ?raw=1. We only render
-	// when the file is small enough to be cheap, looks like text, and
-	// chroma can find a lexer for it (by filename, extension, or content).
-	if r.URL.Query().Get("raw") == "" {
+	// Source-code highlighting branch: opt-IN via ?pretty=1. The default
+	// is to serve everything else byte-for-byte so md-serve can host real
+	// static apps (ES module scripts, CSS, wasm, JSON consumed by code,
+	// etc.) without Chromium's strict-MIME check rejecting them. Directory
+	// listings link source files with ?pretty=1 so humans browsing still
+	// land on the highlighted view; direct URLs / curl / <script src> get
+	// the raw bytes. We only honor ?pretty=1 when the file is small enough
+	// to be cheap, looks like text, and chroma can find a lexer for it
+	// (by filename, extension, or content); otherwise fall through to raw.
+	if r.URL.Query().Get("pretty") != "" {
 		if info, err := os.Stat(fsPath); err == nil && info.Size() <= maxHighlightBytes {
 			if src, err := os.ReadFile(fsPath); err == nil && isTextLike(src) {
 				if lexer := pickLexer(filepath.Base(fsPath), src); lexer != nil {
@@ -441,6 +450,11 @@ func (h *fileHandler) listingHTML(fsPath, urlPath string) (template.HTML, error)
 		if e.IsDir() {
 			display += "/"
 			link += "/"
+		} else if shouldPrettyLink(name) {
+			// Source file we'd highlight: link with ?pretty=1 so a click
+			// from the listing lands on the highlighted view, while
+			// direct URLs / <script src> still get raw bytes.
+			link += "?pretty=1"
 		}
 		fmt.Fprintf(&b,
 			`<tr><td><a href="%s">%s</a></td><td style="text-align:right">%s</td><td>%s</td></tr>`+"\n",
@@ -546,9 +560,10 @@ func (h *fileHandler) serveHighlighted(w http.ResponseWriter, r *http.Request, f
 	name := filepath.Base(fsPath)
 	// Use the absolute URL path for the raw link so it resolves the same
 	// way regardless of the document's base URL (avoids the trap where a
-	// relative `?raw=1` would resolve against a parent path in some
-	// browsers / redirect chains).
-	rawHref := html.EscapeString(urlPath) + "?raw=1"
+	// relative href would resolve against a parent path in some browsers
+	// / redirect chains). Raw is the default for source files now, so the
+	// link is just the bare URL with no query string.
+	rawHref := html.EscapeString(urlPath)
 	body := fmt.Sprintf(
 		`<p class="md-serve-readme-source"><a href="%s">%s</a> · <a href="%s">raw</a></p>%s`,
 		rawHref,
@@ -564,6 +579,22 @@ func (h *fileHandler) serveHighlighted(w http.ResponseWriter, r *http.Request, f
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = pageTpl.Execute(w, data)
+}
+
+// shouldPrettyLink reports whether a directory-listing entry for the
+// given filename should carry a `?pretty=1` query string. We say yes
+// when chroma can identify a lexer by filename — that's a cheap proxy
+// for "this is source code we'd render as a highlighted view" and it
+// avoids reading every file in the directory just to build a listing.
+// Markdown files have their own rendering path; .html/.htm are served
+// raw as the static-server's primary payload, so neither category gets
+// `?pretty=1` even if a lexer exists for them.
+func shouldPrettyLink(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".md", ".markdown", ".html", ".htm":
+		return false
+	}
+	return lexers.Match(name) != nil
 }
 
 // pickLexer chooses a chroma lexer for a file. Tries filename match
