@@ -45,12 +45,21 @@ for platform in "${PLATFORMS[@]}"; do
     echo "ERROR: Missing $pkg_dir — run scripts/build-platforms.sh first"
     exit 1
   fi
-  echo "→ Publishing @choonkeat/md-serve-${platform}…"
+  pkg_name="@choonkeat/md-serve-${platform}"
+  # Skip if this exact name@version is already on the registry. Lets the
+  # script be re-run safely after a partial publish (e.g. when only the
+  # main package failed and the platform packages already shipped).
+  if [ "$DRY_RUN" != "true" ] && \
+     npm view "${pkg_name}@${VERSION}" version >/dev/null 2>&1; then
+    echo "→ Skipping ${pkg_name}@${VERSION} — already on registry"
+    continue
+  fi
+  echo "→ Publishing ${pkg_name}…"
   npm publish "$pkg_dir" --access public $PUBLISH_ARGS
 done
 
 # ── 2. Publish the main package ───────────────────────────────────────────
-echo "→ Publishing md-serve…"
+echo "→ Publishing @choonkeat/md-serve…"
 npm publish "$REPO_ROOT" --access public $PUBLISH_ARGS
 
 echo ""

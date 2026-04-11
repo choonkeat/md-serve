@@ -7,10 +7,14 @@ binaries for Linux / macOS / Windows on x64 and arm64.
 ## Install
 
 ```sh
-npm install -g md-serve
+npm install -g @choonkeat/md-serve
 # or one-shot:
-npx md-serve
+npx @choonkeat/md-serve
 ```
+
+(The published name is scoped — npm rejected the unscoped `md-serve`
+as too similar to an existing package. The installed binary is still
+called `md-serve`.)
 
 ## Usage
 

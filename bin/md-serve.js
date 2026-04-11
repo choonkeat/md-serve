@@ -51,7 +51,7 @@ if (existsSync(localPath)) {
         `Make sure it is installed — this usually means your platform is supported\n` +
         `but the optional dependency was not installed.\n\n` +
         `Try: npm install ${pkgName}\n` +
-        `Or run: npx md-serve`
+        `Or run: npx @choonkeat/md-serve`
     );
     process.exit(1);
   }

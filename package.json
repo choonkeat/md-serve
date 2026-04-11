@@ -1,5 +1,5 @@
 {
-  "name": "md-serve",
+  "name": "@choonkeat/md-serve",
   "version": "0.1.0",
   "description": "Tiny static file server that renders Markdown as GitHub-styled HTML",
   "type": "module",
