@@ -29,13 +29,11 @@ Steps:
 
 4. **Rebuild.** Run `make -C "$REPO_ROOT" build` in the foreground. This cross-compiles all 6 platform binaries via `scripts/build-platforms.sh` and refreshes the embedded `-X main.commit=` ldflag with the current `git rev-parse --short HEAD`. If the build fails, surface the error to the user and stop — do not attempt to launch a stale binary.
 
-5. **Launch in the background** via the node shim, forwarding any extra flags and enabling `-live` so the user gets auto-reload while editing. Use the Bash tool with `run_in_background: true`:
+5. **Launch in the background** via the node shim, forwarding any extra flags. Live-reload is on by default; the user can disable it with `-no-live` in `$ARGUMENTS` if they want. Use the Bash tool with `run_in_background: true`:
 
    ```sh
-   node "$REPO_ROOT/bin/md-serve.js" -dir "$PWD" -live $ARGUMENTS
+   node "$REPO_ROOT/bin/md-serve.js" -dir "$PWD" $ARGUMENTS
    ```
-
-   (`$ARGUMENTS` is forwarded *after* `-live`, so the user can override with `-live=false` if they need to.)
 
    The shim auto-resolves to the freshly built binary in `npm-platforms/<plat>-<arch>/bin/md-serve`, falling back to the npm-installed `@choonkeat/md-serve-<plat>-<arch>` package.
 

@@ -15,10 +15,10 @@ npx md-serve
 ## Usage
 
 ```sh
-md-serve                  # serve $PWD on :$PORT (or :8080)
+md-serve                  # serve $PWD on :$PORT (or :8080), live-reload on
 md-serve -dir ./docs      # serve a specific directory
 md-serve -addr :3000      # bind to a specific address
-md-serve -live            # auto-reload pages when their source file changes (dev)
+md-serve -no-live         # disable the live-reload poller
 md-serve -version
 ```
 
@@ -42,9 +42,10 @@ md-serve -version
 - Dotfiles are hidden from listings.
 - Path traversal is blocked: requests are rejected if they resolve
   outside the served root.
-- With `-live`, rendered pages poll a tiny endpoint once a second and
-  reload themselves when the underlying file's mtime changes. Off by
-  default; intended for local editing, not production.
+- Live-reload is on by default: rendered pages poll a tiny endpoint
+  once a second and reload themselves when the underlying file's mtime
+  changes. Pass `-no-live` to disable (e.g. for production-style
+  serving where you don't want the extra requests).
 
 ## Develop
 

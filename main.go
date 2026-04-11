@@ -44,7 +44,7 @@ var assetsFS embed.FS
 // to collide with anything a user might have on disk.
 const assetsPrefix = "/_md-serve-assets/"
 
-// Endpoint used by injected -live JS to poll for source-file changes.
+// Endpoint used by injected live-reload JS to poll for source-file changes.
 const livereloadPath = "/_md-serve-livereload"
 
 // maxHighlightBytes caps how big a source file we'll syntax-highlight.
@@ -226,7 +226,7 @@ func main() {
 	var (
 		addr    = flag.String("addr", defaultAddr, "address to listen on (defaults to :$PORT if set, else :8080)")
 		dir     = flag.String("dir", ".", "directory to serve")
-		live    = flag.Bool("live", false, "inject a small JS poller that auto-reloads pages when their source file changes (dev only)")
+		noLive  = flag.Bool("no-live", false, "disable the auto-reload JS poller (live-reload is on by default)")
 		showVer = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Usage = func() {
@@ -261,17 +261,18 @@ func main() {
 		goldmark.WithRendererOptions(gmhtml.WithUnsafe()),
 	)
 
-	h := &fileHandler{root: root, md: md, live: *live}
+	live := !*noLive
+	h := &fileHandler{root: root, md: md, live: live}
 	mux := http.NewServeMux()
 	mux.Handle(assetsPrefix, http.StripPrefix(assetsPrefix, http.FileServerFS(mustSub(assetsFS, "assets"))))
-	if *live {
+	if live {
 		mux.HandleFunc(livereloadPath, h.livereload)
 	}
 	mux.Handle("/", h)
 
 	srv := &http.Server{Addr: *addr, Handler: logMiddleware(mux)}
 	liveSuffix := ""
-	if *live {
+	if live {
 		liveSuffix = " [live-reload]"
 	}
 	log.Printf("md-serve %s (%s) serving %s on http://%s%s", version, commit, root, *addr, liveSuffix)
@@ -587,8 +588,8 @@ func isTextLike(content []byte) bool {
 }
 
 // livereload returns the source-file mtime (as Unix nanos) for the page
-// at ?path=<url-path>, so the injected -live JS can poll and reload when
-// the value changes. For directories the result is the max mtime across
+// at ?path=<url-path>, so the injected live-reload JS can poll and reload
+// when the value changes. For directories the result is the max mtime across
 // the dir itself and its immediate non-dotfile entries — that's enough
 // to catch both content edits to the rendered README and add/remove of
 // files in the listing.
