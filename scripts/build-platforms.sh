@@ -4,7 +4,10 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DIR="$REPO_ROOT/npm-platforms"
 VERSION=$(node -p "require('$REPO_ROOT/package.json').version")
-COMMIT=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+# Honor an explicit COMMIT override (useful when the surrounding shell's
+# `git` is wrapped/proxied and `git rev-parse` cannot reach the real repo,
+# e.g. inside some sandboxed dev environments). Otherwise, ask git directly.
+COMMIT="${COMMIT:-$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")}"
 
 echo "Building md-serve v${VERSION} (${COMMIT})"
 
