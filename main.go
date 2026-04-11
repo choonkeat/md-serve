@@ -81,7 +81,7 @@ var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
 <title>{{.Title}}</title>
 <link rel="stylesheet" href="{{.AssetsPrefix}}github-markdown.css">
 <style>
-  body { box-sizing: border-box; min-width: 200px; max-width: 980px; margin: 0 auto; padding: 45px; }
+  body { box-sizing: border-box; min-width: 200px; max-width: var(--md-max-width, 980px); margin: 0 auto; padding: 45px; }
   @media (max-width: 767px) { body { padding: 15px; } }
   /* Directory listing: full-width table that wraps the name column and
      keeps the Size/Modified columns on a single line, so it stays
@@ -91,12 +91,105 @@ var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
   .markdown-body table.md-serve-listing th:nth-child(n+2),
   .markdown-body table.md-serve-listing td:nth-child(n+2) { white-space: nowrap; }
   .markdown-body p.md-serve-readme-source { margin: 16px 0 8px 0; font-size: 13px; color: #57606a; }
+  /* Reader-controlled page width widget. Subtle until hovered, bottom-right
+     fixed, never affects document layout. Persists choice in localStorage so
+     it survives reloads and applies before paint via the head script below. */
+  .md-serve-width-ctrl { position: fixed; bottom: 12px; right: 12px; z-index: 9999;
+    font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    opacity: 0.35; transition: opacity 0.15s ease; }
+  .md-serve-width-ctrl:hover, .md-serve-width-ctrl[open] { opacity: 1; }
+  .md-serve-width-ctrl > summary { list-style: none; cursor: pointer;
+    width: 28px; height: 28px; line-height: 26px; text-align: center;
+    background: #ffffff; border: 1px solid #d0d7de; border-radius: 6px;
+    color: #57606a; box-shadow: 0 1px 3px rgba(27,31,36,0.08); user-select: none; }
+  .md-serve-width-ctrl > summary::-webkit-details-marker { display: none; }
+  .md-serve-width-ctrl[open] > summary { border-bottom-right-radius: 0; border-bottom-left-radius: 0; }
+  .md-serve-width-panel { position: absolute; right: 0; bottom: 28px;
+    background: #ffffff; border: 1px solid #d0d7de; border-radius: 6px 6px 0 6px;
+    box-shadow: 0 1px 3px rgba(27,31,36,0.08); padding: 10px 12px;
+    display: flex; flex-direction: column; gap: 8px; min-width: 220px; color: #57606a; }
+  .md-serve-width-panel label { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .md-serve-width-panel input[type=range] { flex: 1; }
+  .md-serve-width-panel .md-serve-width-row { display: flex; gap: 6px; }
+  .md-serve-width-panel button { flex: 1; background: #f6f8fa; border: 1px solid #d0d7de;
+    border-radius: 4px; padding: 4px 8px; cursor: pointer; font: inherit; color: #24292f; }
+  .md-serve-width-panel button:hover { background: #eef1f4; }
+  @media (prefers-color-scheme: dark) {
+    .md-serve-width-ctrl > summary,
+    .md-serve-width-panel { background: #161b22; border-color: #30363d; color: #8b949e; }
+    .md-serve-width-panel button { background: #21262d; border-color: #30363d; color: #c9d1d9; }
+    .md-serve-width-panel button:hover { background: #30363d; }
+  }
 </style>
+<script>
+/* Apply stored width before <body> paints, to avoid a flash at the default. */
+(function(){
+  try {
+    var w = localStorage.getItem('md-serve-max-width');
+    if (w) document.documentElement.style.setProperty('--md-max-width', w);
+  } catch(e) {}
+})();
+</script>
 </head>
 <body>
 <article class="markdown-body">
 {{.Body}}
 </article>
+<details class="md-serve-width-ctrl" aria-label="Page width">
+  <summary title="Page width">&#8596;</summary>
+  <div class="md-serve-width-panel">
+    <label>Width <span data-md-width-label>980px</span></label>
+    <input type="range" min="480" max="1800" step="20" value="980" data-md-width-slider>
+    <div class="md-serve-width-row">
+      <button type="button" data-md-width-action="full">Full</button>
+      <button type="button" data-md-width-action="reset">Reset</button>
+    </div>
+  </div>
+</details>
+<script>
+(function(){
+  var KEY = 'md-serve-max-width';
+  var DEFAULT_PX = 980;
+  var slider = document.querySelector('[data-md-width-slider]');
+  var label  = document.querySelector('[data-md-width-label]');
+  function setVar(v){ document.documentElement.style.setProperty('--md-max-width', v); }
+  function clearVar(){ document.documentElement.style.removeProperty('--md-max-width'); }
+  function syncFromStored(){
+    var stored = null;
+    try { stored = localStorage.getItem(KEY); } catch(e){}
+    if (stored === 'none') {
+      label.textContent = 'full';
+      slider.value = slider.max;
+    } else if (stored && /^\d+px$/.test(stored)) {
+      var n = parseInt(stored, 10);
+      slider.value = String(n);
+      label.textContent = n + 'px';
+    } else {
+      slider.value = String(DEFAULT_PX);
+      label.textContent = DEFAULT_PX + 'px (default)';
+    }
+  }
+  slider.addEventListener('input', function(){
+    var v = slider.value + 'px';
+    setVar(v);
+    label.textContent = slider.value + 'px';
+    try { localStorage.setItem(KEY, v); } catch(e){}
+  });
+  document.querySelector('[data-md-width-action="full"]').addEventListener('click', function(){
+    setVar('none');
+    label.textContent = 'full';
+    slider.value = slider.max;
+    try { localStorage.setItem(KEY, 'none'); } catch(e){}
+  });
+  document.querySelector('[data-md-width-action="reset"]').addEventListener('click', function(){
+    clearVar();
+    try { localStorage.removeItem(KEY); } catch(e){}
+    slider.value = String(DEFAULT_PX);
+    label.textContent = DEFAULT_PX + 'px (default)';
+  });
+  syncFromStored();
+})();
+</script>
 {{if .LiveReload}}<script>
 (function(){
   var last=null;
