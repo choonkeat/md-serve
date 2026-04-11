@@ -376,6 +376,13 @@ func (h *fileHandler) serveFile(w http.ResponseWriter, r *http.Request, fsPath, 
 		}
 		return
 	}
+	// HTML files are not "source code" — they are the static-server's
+	// primary payload. Hand them straight to http.ServeFile so the
+	// browser renders them. Same for .htm.
+	if ext == ".html" || ext == ".htm" {
+		http.ServeFile(w, r, fsPath)
+		return
+	}
 	// Source-code highlighting branch: opt-out via ?raw=1. We only render
 	// when the file is small enough to be cheap, looks like text, and
 	// chroma can find a lexer for it (by filename, extension, or content).
@@ -537,10 +544,16 @@ func (h *fileHandler) serveHighlighted(w http.ResponseWriter, r *http.Request, f
 		return
 	}
 	name := filepath.Base(fsPath)
+	// Use the absolute URL path for the raw link so it resolves the same
+	// way regardless of the document's base URL (avoids the trap where a
+	// relative `?raw=1` would resolve against a parent path in some
+	// browsers / redirect chains).
+	rawHref := html.EscapeString(urlPath) + "?raw=1"
 	body := fmt.Sprintf(
-		`<p class="md-serve-readme-source"><a href="%s?raw=1">%s</a> · <a href="?raw=1">raw</a></p>%s`,
+		`<p class="md-serve-readme-source"><a href="%s">%s</a> · <a href="%s">raw</a></p>%s`,
+		rawHref,
 		html.EscapeString(name),
-		html.EscapeString(name),
+		rawHref,
 		code.String(),
 	)
 	data := pageData{
