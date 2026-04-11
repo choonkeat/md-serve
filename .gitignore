@@ -1,0 +1,8 @@
+/npm-platforms/
+/node_modules/
+/tmp/
+*.log
+.DS_Store
+/.swe-swe/
+/swe-swe/
+/container-templates/

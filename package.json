@@ -1,0 +1,29 @@
+{
+  "name": "md-serve",
+  "version": "0.1.0",
+  "description": "Tiny static file server that renders Markdown as GitHub-styled HTML",
+  "type": "module",
+  "bin": {
+    "md-serve": "bin/md-serve.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "scripts": {
+    "postinstall": "node -e \"try{require('fs').chmodSync(require('path').join(__dirname,'bin','md-serve.js'),0o755)}catch(e){}\"",
+    "prepare": "node scripts/prepare-local-build.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/choonkeat/md-serve.git"
+  },
+  "license": "MIT",
+  "optionalDependencies": {
+    "@choonkeat/md-serve-darwin-arm64": "0.1.0",
+    "@choonkeat/md-serve-darwin-x64": "0.1.0",
+    "@choonkeat/md-serve-linux-arm64": "0.1.0",
+    "@choonkeat/md-serve-linux-x64": "0.1.0",
+    "@choonkeat/md-serve-win32-arm64": "0.1.0",
+    "@choonkeat/md-serve-win32-x64": "0.1.0"
+  }
+}
