@@ -20,10 +20,15 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/alecthomas/chroma/v2"
+	chromahtml "github.com/alecthomas/chroma/v2/formatters/html"
+	"github.com/alecthomas/chroma/v2/lexers"
+	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
 	gmhtml "github.com/yuin/goldmark/renderer/html"
+	highlighting "github.com/yuin/goldmark-highlighting/v2"
 )
 
 // Populated via -ldflags at build time (see scripts/build-platforms.sh).
@@ -41,6 +46,32 @@ const assetsPrefix = "/_md-serve-assets/"
 
 // Endpoint used by injected -live JS to poll for source-file changes.
 const livereloadPath = "/_md-serve-livereload"
+
+// maxHighlightBytes caps how big a source file we'll syntax-highlight.
+// Above this, we fall back to byte-for-byte serving via http.ServeFile so
+// the browser handles the download instead of us building a giant DOM.
+const maxHighlightBytes = 1 << 20 // 1 MiB
+
+// chromaFormatter renders chroma tokens to HTML with inline styles, line
+// numbers in a separate <td> column, and linkable anchors so URLs like
+// /main.go#L42 jump to the right line.
+var chromaFormatter = chromahtml.New(
+	chromahtml.WithClasses(false),
+	chromahtml.WithLineNumbers(true),
+	chromahtml.LineNumbersInTable(true),
+	chromahtml.WithLinkableLineNumbers(true, "L"),
+)
+
+// chromaStyle is the colour theme for both markdown fenced blocks (via
+// goldmark-highlighting) and standalone source files. Picked to match
+// the rest of the GitHub-styled chrome.
+var chromaStyle = func() *chroma.Style {
+	s := styles.Get("github")
+	if s == nil {
+		s = styles.Fallback
+	}
+	return s
+}()
 
 var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
 <html lang="en">
@@ -126,7 +157,13 @@ func main() {
 	}
 
 	md := goldmark.New(
-		goldmark.WithExtensions(extension.GFM),
+		goldmark.WithExtensions(
+			extension.GFM,
+			highlighting.NewHighlighting(
+				highlighting.WithStyle("github"),
+				highlighting.WithFormatOptions(chromahtml.WithClasses(false)),
+			),
+		),
 		goldmark.WithParserOptions(parser.WithAutoHeadingID()),
 		goldmark.WithRendererOptions(gmhtml.WithUnsafe()),
 	)
@@ -244,6 +281,19 @@ func (h *fileHandler) serveFile(w http.ResponseWriter, r *http.Request, fsPath, 
 			log.Printf("md-serve: template: %v", err)
 		}
 		return
+	}
+	// Source-code highlighting branch: opt-out via ?raw=1. We only render
+	// when the file is small enough to be cheap, looks like text, and
+	// chroma can find a lexer for it (by filename, extension, or content).
+	if r.URL.Query().Get("raw") == "" {
+		if info, err := os.Stat(fsPath); err == nil && info.Size() <= maxHighlightBytes {
+			if src, err := os.ReadFile(fsPath); err == nil && isTextLike(src) {
+				if lexer := pickLexer(filepath.Base(fsPath), src); lexer != nil {
+					h.serveHighlighted(w, r, fsPath, urlPath, src, lexer)
+					return
+				}
+			}
+		}
 	}
 	http.ServeFile(w, r, fsPath)
 }
@@ -376,6 +426,71 @@ func (h *fileHandler) serveCombinedDir(w http.ResponseWriter, r *http.Request, f
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = pageTpl.Execute(w, data)
+}
+
+// serveHighlighted renders a source file as a syntax-highlighted HTML
+// page using chroma. The surrounding chrome (filename label, "raw" link)
+// matches the README label used by combined dir pages.
+func (h *fileHandler) serveHighlighted(w http.ResponseWriter, r *http.Request, fsPath, urlPath string, src []byte, lexer chroma.Lexer) {
+	iterator, err := chroma.Coalesce(lexer).Tokenise(nil, string(src))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var code bytes.Buffer
+	if err := chromaFormatter.Format(&code, chromaStyle, iterator); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	name := filepath.Base(fsPath)
+	body := fmt.Sprintf(
+		`<p class="md-serve-readme-source"><a href="%s?raw=1">%s</a> · <a href="?raw=1">raw</a></p>%s`,
+		html.EscapeString(name),
+		html.EscapeString(name),
+		code.String(),
+	)
+	data := pageData{
+		Title:        name + " — " + urlPath,
+		Body:         template.HTML(body),
+		AssetsPrefix: assetsPrefix,
+		LiveReload:   h.live,
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = pageTpl.Execute(w, data)
+}
+
+// pickLexer chooses a chroma lexer for a file. Tries filename match
+// (handles Makefile, Dockerfile, go.mod, etc.) first, then content
+// analysis as a fallback. Returns nil if neither yields a real match —
+// the caller should fall back to byte-for-byte serving in that case
+// rather than highlight as plain text, since most "unknown" hits in a
+// docs tree are random binary or proprietary formats we shouldn't dress
+// up as code.
+func pickLexer(filename string, content []byte) chroma.Lexer {
+	if l := lexers.Match(filename); l != nil {
+		return l
+	}
+	if l := lexers.Analyse(string(content)); l != nil {
+		return l
+	}
+	return nil
+}
+
+// isTextLike does a cheap binary-vs-text sniff: scan the first 512 bytes
+// for a NUL byte. Far from perfect (UTF-16, some binary formats without
+// NULs early on, etc.) but catches the common "don't try to highlight a
+// PNG" case with no false positives on real source code.
+func isTextLike(content []byte) bool {
+	n := len(content)
+	if n > 512 {
+		n = 512
+	}
+	for i := 0; i < n; i++ {
+		if content[i] == 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // livereload returns the source-file mtime (as Unix nanos) for the page

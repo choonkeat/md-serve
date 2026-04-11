@@ -27,10 +27,17 @@ md-serve -version
 - `.md` / `.markdown` files render as HTML using
   [goldmark](https://github.com/yuin/goldmark) with GFM, styled with
   [github-markdown-css](https://github.com/sindresorhus/github-markdown-css).
+  Fenced code blocks are syntax-highlighted via
+  [chroma](https://github.com/alecthomas/chroma) (200+ languages).
 - Directories show a generated listing with **Name / Size / Modified**
   columns. If `index.md` / `README.md` / `readme.md` / `index.markdown`
   is present, it's rendered below the listing GitHub-style. If only
   `index.html` is present, it's served raw.
+- Source files (`.go`, `.py`, `.json`, `.yaml`, `.toml`, `Dockerfile`,
+  `Makefile`, ...) render as syntax-highlighted HTML with linkable line
+  numbers (`/main.go#L42`). Append `?raw=1` to any URL to bypass and
+  fetch the byte-for-byte original. Files larger than 1 MiB or that
+  look binary skip highlighting and stream raw.
 - Everything else is served byte-for-byte.
 - Dotfiles are hidden from listings.
 - Path traversal is blocked: requests are rejected if they resolve
