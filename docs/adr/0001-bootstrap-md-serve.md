@@ -119,7 +119,9 @@ Mechanics:
    `bin/md-serve.js`. No runtime deps.
 2. The shim detects `process.platform` + `process.arch`, then `require.resolve`s
    a platform-specific package like `@choonkeat/md-serve-linux-x64`, and
-   `spawnSync`s the native binary contained within.
+   spawns the native binary contained within. (Originally `spawnSync`;
+   later switched to async `spawn` with signal forwarding so that
+   SIGTERM/SIGINT propagate to the Go child instead of orphaning it.)
 3. Those six platform packages (`darwin-{x64,arm64}`, `linux-{x64,arm64}`,
    `win32-{x64,arm64}`) are listed as `optionalDependencies` on the primary
    package. npm's `os`/`cpu` package-json fields ensure a given user only
@@ -169,15 +171,19 @@ without flag plumbing.
 - **Six platform packages to publish** per release. Mitigated by the
   `make build-platforms` / `make publish` pipeline and version-lockstep
   guard in `scripts/publish.sh`.
-- **No live-reload** (markserv has this). Can be added later with
-  `fsnotify` + a `/ws` endpoint when needed.
-- **No syntax highlighting** inside fenced code blocks (plain `<pre><code>`).
-  Adding `chroma` with the `github` style is a small change; deferred to
-  keep the dep surface minimal for v0.1.
+- ~~**No live-reload** (markserv has this).~~ Live reload landed in v0.1
+  (see commit `b781c1f`); it is on by default and uses an injected JS
+  poller, not WebSocket. Pass `-no-live` to disable.
+- ~~**No syntax highlighting** inside fenced code blocks.~~ Chroma syntax
+  highlighting landed in v0.1 (see commit `8456629`). Fenced blocks and
+  standalone source files are both highlighted using the `github` /
+  `github-dark` chroma themes with `prefers-color-scheme` media queries
+  (see ADR 0003).
 
 ### Follow-ups / explicit non-goals for v0.1
-- Syntax highlighting (chroma) — deferred.
-- Live reload — deferred.
+- ~~Syntax highlighting (chroma) — deferred.~~ Shipped in v0.1 (`8456629`).
+- ~~Live reload — deferred.~~ Shipped in v0.1 (`b781c1f`).
+- Dark mode — shipped in v0.2 (see ADR 0003).
 - Authentication / access control — explicit non-goal; this is a dev tool.
 - Multi-page navigation, search, sidebar TOCs — use MkDocs/mdBook if you
   need those.
