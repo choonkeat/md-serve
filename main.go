@@ -52,26 +52,61 @@ const livereloadPath = "/_md-serve-livereload"
 // the browser handles the download instead of us building a giant DOM.
 const maxHighlightBytes = 1 << 20 // 1 MiB
 
-// chromaFormatter renders chroma tokens to HTML with inline styles, line
-// numbers in a separate <td> column, and linkable anchors so URLs like
-// /main.go#L42 jump to the right line.
+// chromaFormatter renders chroma tokens to HTML using class names (not
+// inline styles) so the syntax theme can swap with prefers-color-scheme.
+// Line numbers go in a separate <td> column with linkable anchors so
+// URLs like /main.go#L42 jump to the right line.
 var chromaFormatter = chromahtml.New(
-	chromahtml.WithClasses(false),
+	chromahtml.WithClasses(true),
 	chromahtml.WithLineNumbers(true),
 	chromahtml.LineNumbersInTable(true),
 	chromahtml.WithLinkableLineNumbers(true, "L"),
 )
 
-// chromaStyle is the colour theme for both markdown fenced blocks (via
-// goldmark-highlighting) and standalone source files. Picked to match
-// the rest of the GitHub-styled chrome.
-var chromaStyle = func() *chroma.Style {
-	s := styles.Get("github")
-	if s == nil {
-		s = styles.Fallback
+// chromaLightStyle / chromaDarkStyle are the syntax themes for light and
+// dark mode respectively. Both use chroma's built-in github themes so the
+// colours line up with the rest of the GitHub-styled chrome.
+var (
+	chromaLightStyle = pickChromaStyle("github")
+	chromaDarkStyle  = pickChromaStyle("github-dark")
+)
+
+func pickChromaStyle(name string) *chroma.Style {
+	if s := styles.Get(name); s != nil {
+		return s
 	}
-	return s
+	return styles.Fallback
+}
+
+// chromaCSS is generated once at init time and inlined into every page.
+// It carries chroma's "github" (light) syntax stylesheet followed by the
+// "github-dark" stylesheet wrapped in @media (prefers-color-scheme: dark),
+// so highlighted code blocks track the user's mode instead of staying
+// frozen in the light theme. Each rule is scoped under .markdown-body so
+// chroma's background beats github-markdown.css's `.markdown-body pre`
+// rule, which would otherwise mask chroma's per-mode colours.
+var chromaCSS = func() template.CSS {
+	var b strings.Builder
+	var light bytes.Buffer
+	if err := chromaFormatter.WriteCSS(&light, chromaLightStyle); err == nil {
+		b.WriteString(scopeChromaCSS(light.String()))
+	}
+	var dark bytes.Buffer
+	if err := chromaFormatter.WriteCSS(&dark, chromaDarkStyle); err == nil {
+		b.WriteString("\n@media (prefers-color-scheme: dark) {\n")
+		b.WriteString(scopeChromaCSS(dark.String()))
+		b.WriteString("}\n")
+	}
+	return template.CSS(b.String())
 }()
+
+// scopeChromaCSS prefixes every chroma class selector with .markdown-body
+// so the rules outweigh github-markdown.css's `.markdown-body pre` styling.
+// Without this the GitHub stylesheet's pre background would override
+// chroma's, which is what we need to differ between light and dark mode.
+func scopeChromaCSS(css string) string {
+	return strings.ReplaceAll(css, ".chroma", ".markdown-body .chroma")
+}
 
 var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
 <html lang="en">
@@ -80,7 +115,11 @@ var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}}</title>
 <link rel="stylesheet" href="{{.AssetsPrefix}}github-markdown.css">
+<style>{{.ChromaCSS}}</style>
 <style>
+  /* Tell the browser we support both schemes so scrollbars, form controls,
+     and other UA-rendered chrome adapt to the user's preference. */
+  :root { color-scheme: light dark; }
   body { box-sizing: border-box; min-width: 200px; max-width: var(--md-max-width, 980px); margin: 0 auto; padding: 45px; }
   @media (max-width: 767px) { body { padding: 15px; } }
   /* Directory listing: full-width table that wraps the name column and
@@ -115,6 +154,14 @@ var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
     border-radius: 4px; padding: 4px 8px; cursor: pointer; font: inherit; color: #24292f; }
   .md-serve-width-panel button:hover { background: #eef1f4; }
   @media (prefers-color-scheme: dark) {
+    /* Match the body to the .markdown-body dark background so the 45px
+       padding around the article doesn't show a tonal seam against the
+       browser's UA-default dark canvas. */
+    body { background: #0d1117; }
+    /* The README/source label between the listing and the rendered file
+       is the only piece of chrome whose color isn't already dark-mode
+       aware via github-markdown.css. #57606a is invisible on #0d1117. */
+    .markdown-body p.md-serve-readme-source { color: #8b949e; }
     .md-serve-width-ctrl > summary,
     .md-serve-width-panel { background: #161b22; border-color: #30363d; color: #8b949e; }
     .md-serve-width-panel button { background: #21262d; border-color: #30363d; color: #c9d1d9; }
@@ -213,6 +260,7 @@ type pageData struct {
 	Title        string
 	Body         template.HTML
 	AssetsPrefix string
+	ChromaCSS    template.CSS
 	LiveReload   bool
 }
 
@@ -243,6 +291,7 @@ func main() {
 		fmt.Fprintf(out, "    linkable line numbers (e.g. /main.go?pretty=1#L42). Directory listings\n")
 		fmt.Fprintf(out, "    already link source files this way; direct URLs / curl / <script src>\n")
 		fmt.Fprintf(out, "    get raw bytes.\n")
+		fmt.Fprintf(out, "  • Syntax highlighting respects prefers-color-scheme (github light/dark).\n")
 		fmt.Fprintf(out, "  • Live-reload polls every second; pass -no-live to disable.\n")
 		fmt.Fprintf(out, "  • Dotfiles are hidden; path traversal outside -dir is rejected.\n\n")
 		fmt.Fprintf(out, "Flags:\n")
@@ -268,7 +317,7 @@ func main() {
 			extension.GFM,
 			highlighting.NewHighlighting(
 				highlighting.WithStyle("github"),
-				highlighting.WithFormatOptions(chromahtml.WithClasses(false)),
+				highlighting.WithFormatOptions(chromahtml.WithClasses(true)),
 			),
 		),
 		goldmark.WithParserOptions(parser.WithAutoHeadingID()),
@@ -385,6 +434,7 @@ func (h *fileHandler) serveFile(w http.ResponseWriter, r *http.Request, fsPath, 
 			Title:        title,
 			Body:         template.HTML(buf.String()),
 			AssetsPrefix: assetsPrefix,
+			ChromaCSS:    chromaCSS,
 			LiveReload:   h.live,
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -509,6 +559,7 @@ func (h *fileHandler) serveDirIndex(w http.ResponseWriter, r *http.Request, fsPa
 		Title:        "Index of " + urlPath,
 		Body:         template.HTML(body),
 		AssetsPrefix: assetsPrefix,
+		ChromaCSS:    chromaCSS,
 		LiveReload:   h.live,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -551,6 +602,7 @@ func (h *fileHandler) serveCombinedDir(w http.ResponseWriter, r *http.Request, f
 		Title:        readmeName + " — " + urlPath,
 		Body:         template.HTML(body),
 		AssetsPrefix: assetsPrefix,
+		ChromaCSS:    chromaCSS,
 		LiveReload:   h.live,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -567,7 +619,7 @@ func (h *fileHandler) serveHighlighted(w http.ResponseWriter, r *http.Request, f
 		return
 	}
 	var code bytes.Buffer
-	if err := chromaFormatter.Format(&code, chromaStyle, iterator); err != nil {
+	if err := chromaFormatter.Format(&code, chromaLightStyle, iterator); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -589,6 +641,7 @@ func (h *fileHandler) serveHighlighted(w http.ResponseWriter, r *http.Request, f
 		Title:        name + " — " + urlPath,
 		Body:         template.HTML(body),
 		AssetsPrefix: assetsPrefix,
+		ChromaCSS:    chromaCSS,
 		LiveReload:   h.live,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
