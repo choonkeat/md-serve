@@ -223,3 +223,55 @@ rather than `http.ServeFile` because the latter 301-redirects requests
 ending in `/index.html` to the directory form, which would drop the
 forced `text/plain` headers and re-enter the directory's `index.html`
 rendering branch.
+
+## Update — `Accept` header gates pretty rendering
+
+The original "Non-goals" section above ruled out content negotiation:
+
+> No automatic content negotiation (e.g. Accept-header sniffing to serve
+> HTML to browsers and raw to curl). The query-string approach is
+> explicit, predictable, cacheable, and bookmarkable.
+
+That stance was correct as the *only* mechanism — but it left a gap once
+markdown and `.html` defaulted to pretty rendering. An API consumer
+fetching `/README.md` with `Accept: application/json`, or `curl -H
+'Accept: text/plain'`, got an HTML wrapper they then had to strip. The
+query-string opt-out (`?pretty=0`) requires the caller to know about it
+and modify every URL they touch, which doesn't compose with bookmarks
+or hand-typed paths.
+
+The Accept header is the standard way clients express what they can
+render. Honoring it costs nothing, breaks nothing, and is what every
+other content-aware server does:
+
+- If `pretty` would otherwise be true (extension default, or explicit
+  `?pretty=1`) **and** the request's `Accept` header doesn't include
+  `text/html`, `application/xhtml+xml`, `text/*`, or `*/*`, force
+  `pretty=false`. Equivalent to `?pretty=0` for that one request.
+- Empty/missing Accept means "anything" (RFC 9110); we treat it as
+  HTML-accepting.
+- The Accept check applies *after* the query-string check, so it
+  overrides explicit `?pretty=1`. Rationale: a client that says it
+  can't render HTML probably set the query string by accident (or
+  inherited it from a referrer); shipping HTML anyway is worse than
+  ignoring the hint.
+
+What stays the same: query-string semantics are unchanged for clients
+that *do* accept HTML. Browsers, `curl` with no `-H`, `wget`, and
+default `fetch()` all send `Accept: */*` or a list including
+`text/html`, so they hit the same code paths as before. The only
+behavior shift is for clients explicitly opting out of HTML — and for
+those, raw bytes is what they were trying to ask for.
+
+This reverses the "no Accept sniffing" non-goal. The original argument
+(query-string is "explicit, predictable, cacheable, bookmarkable") is
+still true for the query string itself; the Accept gate is purely
+additive for the API/curl-with-Accept use case the query string can't
+serve cleanly.
+
+Caching note: responses now vary by Accept for `prettyByDefault=true`
+extensions. We don't currently set `Vary: Accept` — the typical
+deployment is dev/local serving with no shared cache, and adding the
+header would force CDN re-fetches for the common case where Accept
+doesn't actually change the body. If md-serve grows a production-cache
+deployment story, revisit.

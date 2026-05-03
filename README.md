@@ -51,6 +51,12 @@ md-serve -version
   URLs / `curl` / `<script src>` get the raw bytes. Files larger than
   1 MiB, files that look binary, or files chroma can't lex stay raw
   even with `?pretty=1`.
+- Pretty rendering also gates on the `Accept` header: a client whose
+  Accept doesn't include `text/html` (e.g. `curl -H 'Accept:
+  application/json'`, `fetch()` with an explicit Accept) gets raw
+  bytes regardless of `?pretty=1` or the extension's default. So an
+  API consumer asking for `/README.md` with `Accept: application/json`
+  gets the source, not an HTML wrapper.
 - Dotfiles are hidden from listings.
 - Path traversal is blocked: requests are rejected if they resolve
   outside the served root.

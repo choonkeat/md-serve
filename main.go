@@ -294,6 +294,8 @@ func main() {
 		fmt.Fprintf(out, "    get raw bytes.\n")
 		fmt.Fprintf(out, "  • Append ?pretty=0 to a markdown or .html URL to fetch the raw source\n")
 		fmt.Fprintf(out, "    instead of the rendered page (Content-Type: text/plain).\n")
+		fmt.Fprintf(out, "  • Clients whose Accept header doesn't include text/html (curl -H, fetch\n")
+		fmt.Fprintf(out, "    with Accept: application/json, ...) get raw bytes regardless of pretty.\n")
 		fmt.Fprintf(out, "  • Syntax highlighting respects prefers-color-scheme (github light/dark).\n")
 		fmt.Fprintf(out, "  • Live-reload polls every second; pass -no-live to disable.\n")
 		fmt.Fprintf(out, "  • Dotfiles are hidden; path traversal outside -dir is rejected.\n\n")
@@ -452,6 +454,14 @@ func (h *fileHandler) serveFile(w http.ResponseWriter, r *http.Request, fsPath, 
 		if b, err := strconv.ParseBool(v); err == nil {
 			pretty = b
 		}
+	}
+	// A client whose Accept header doesn't include text/html (curl -H,
+	// fetch with Accept: application/json, an SDK that wants the bytes)
+	// shouldn't get the HTML viewer wrapper even when pretty would
+	// otherwise apply — wrapping their response in <html> is just noise
+	// they'd then have to strip. Treat as ?pretty=0.
+	if pretty && !acceptsHTML(r) {
+		pretty = false
 	}
 
 	if pretty {
@@ -743,6 +753,30 @@ func pickLexer(filename string, content []byte) chroma.Lexer {
 		return l
 	}
 	return nil
+}
+
+// acceptsHTML reports whether the request's Accept header indicates the
+// client is willing to render HTML. Missing/empty Accept means "anything"
+// per RFC 9110, so we say yes. Otherwise we say yes only if one of the
+// listed media ranges covers text/html: text/html, text/*, */*, or
+// application/xhtml+xml. q-values aren't parsed — q=0 explicit rejection
+// is rare enough in practice that the simpler check is worth the trade.
+func acceptsHTML(r *http.Request) bool {
+	accept := r.Header.Get("Accept")
+	if accept == "" {
+		return true
+	}
+	for _, part := range strings.Split(accept, ",") {
+		mt := strings.TrimSpace(part)
+		if i := strings.Index(mt, ";"); i >= 0 {
+			mt = strings.TrimSpace(mt[:i])
+		}
+		switch strings.ToLower(mt) {
+		case "text/html", "application/xhtml+xml", "text/*", "*/*":
+			return true
+		}
+	}
+	return false
 }
 
 // isTextLike does a cheap binary-vs-text sniff: scan the first 512 bytes
