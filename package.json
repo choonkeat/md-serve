@@ -1,6 +1,6 @@
 {
   "name": "@choonkeat/md-serve",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Tiny static file server that renders Markdown as GitHub-styled HTML",
   "type": "module",
   "bin": {
@@ -19,11 +19,11 @@
   },
   "license": "MIT",
   "optionalDependencies": {
-    "@choonkeat/md-serve-darwin-arm64": "0.2.1",
-    "@choonkeat/md-serve-darwin-x64": "0.2.1",
-    "@choonkeat/md-serve-linux-arm64": "0.2.1",
-    "@choonkeat/md-serve-linux-x64": "0.2.1",
-    "@choonkeat/md-serve-win32-arm64": "0.2.1",
-    "@choonkeat/md-serve-win32-x64": "0.2.1"
+    "@choonkeat/md-serve-darwin-arm64": "0.3.0",
+    "@choonkeat/md-serve-darwin-x64": "0.3.0",
+    "@choonkeat/md-serve-linux-arm64": "0.3.0",
+    "@choonkeat/md-serve-linux-x64": "0.3.0",
+    "@choonkeat/md-serve-win32-arm64": "0.3.0",
+    "@choonkeat/md-serve-win32-x64": "0.3.0"
   }
 }

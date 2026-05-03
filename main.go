@@ -18,6 +18,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/alecthomas/chroma/v2"
@@ -291,6 +292,8 @@ func main() {
 		fmt.Fprintf(out, "    linkable line numbers (e.g. /main.go?pretty=1#L42). Directory listings\n")
 		fmt.Fprintf(out, "    already link source files this way; direct URLs / curl / <script src>\n")
 		fmt.Fprintf(out, "    get raw bytes.\n")
+		fmt.Fprintf(out, "  • Append ?pretty=0 to a markdown or .html URL to fetch the raw source\n")
+		fmt.Fprintf(out, "    instead of the rendered page (Content-Type: text/plain).\n")
 		fmt.Fprintf(out, "  • Syntax highlighting respects prefers-color-scheme (github light/dark).\n")
 		fmt.Fprintf(out, "  • Live-reload polls every second; pass -no-live to disable.\n")
 		fmt.Fprintf(out, "  • Dotfiles are hidden; path traversal outside -dir is rejected.\n\n")
@@ -416,56 +419,117 @@ func (h *fileHandler) serveDir(w http.ResponseWriter, r *http.Request, fsPath, u
 	h.serveDirIndex(w, r, fsPath, urlPath)
 }
 
+// prettyEntry describes how a file extension behaves with respect to the
+// `?pretty=` query string: which renderer to invoke when pretty mode is on,
+// and whether pretty mode is the default for that extension. Extensions not
+// listed in prettyRegistry implicitly use chroma as their pretty renderer
+// and default to raw.
+type prettyEntry struct {
+	render          func(*fileHandler, http.ResponseWriter, *http.Request, string, string)
+	prettyByDefault bool
+}
+
+// prettyRegistry is the single source of truth for per-extension behavior.
+// Markdown is rendered server-side (goldmark); .html is rendered by the
+// browser (http.ServeFile sends Content-Type: text/html). Both default to
+// pretty=true. Everything else is implicitly { chroma, prettyByDefault: false }.
+var prettyRegistry = map[string]prettyEntry{
+	".md":       {(*fileHandler).renderMarkdownPage, true},
+	".markdown": {(*fileHandler).renderMarkdownPage, true},
+	".html":     {(*fileHandler).serveBrowserHTML, true},
+	".htm":      {(*fileHandler).serveBrowserHTML, true},
+}
+
 func (h *fileHandler) serveFile(w http.ResponseWriter, r *http.Request, fsPath, urlPath string) {
 	ext := strings.ToLower(filepath.Ext(fsPath))
-	if ext == ".md" || ext == ".markdown" {
-		src, err := os.ReadFile(fsPath)
+	entry, registered := prettyRegistry[ext]
+	if !registered {
+		entry = prettyEntry{render: (*fileHandler).tryChromaHighlight, prettyByDefault: false}
+	}
+
+	pretty := entry.prettyByDefault
+	if v := r.URL.Query().Get("pretty"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			pretty = b
+		}
+	}
+
+	if pretty {
+		entry.render(h, w, r, fsPath, urlPath)
+		return
+	}
+
+	// Raw mode. For extensions whose default is pretty (markdown, html), force
+	// text/plain so the browser shows the source instead of auto-rendering it,
+	// and use http.ServeContent rather than http.ServeFile because the latter
+	// 301-redirects /foo/index.html → /foo/ (canonical-URL behavior baked into
+	// the stdlib) and would drop the headers we set.
+	if entry.prettyByDefault {
+		f, err := os.Open(fsPath)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		var buf bytes.Buffer
-		if err := h.md.Convert(src, &buf); err != nil {
+		defer f.Close()
+		info, err := f.Stat()
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		title := filepath.Base(fsPath)
-		data := pageData{
-			Title:        title,
-			Body:         template.HTML(buf.String()),
-			AssetsPrefix: assetsPrefix,
-			ChromaCSS:    chromaCSS,
-			LiveReload:   h.live,
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := pageTpl.Execute(w, data); err != nil {
-			log.Printf("md-serve: template: %v", err)
-		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		http.ServeContent(w, r, fsPath, info.ModTime(), f)
 		return
 	}
-	// HTML files are not "source code" — they are the static-server's
-	// primary payload. Hand them straight to http.ServeFile so the
-	// browser renders them. Same for .htm.
-	if ext == ".html" || ext == ".htm" {
-		http.ServeFile(w, r, fsPath)
+	http.ServeFile(w, r, fsPath)
+}
+
+// renderMarkdownPage is the pretty renderer for .md / .markdown: convert the
+// file with goldmark and wrap it in the GitHub-styled page template.
+func (h *fileHandler) renderMarkdownPage(w http.ResponseWriter, r *http.Request, fsPath, urlPath string) {
+	src, err := os.ReadFile(fsPath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// Source-code highlighting branch: opt-IN via ?pretty=1. The default
-	// is to serve everything else byte-for-byte so md-serve can host real
-	// static apps (ES module scripts, CSS, wasm, JSON consumed by code,
-	// etc.) without Chromium's strict-MIME check rejecting them. Directory
-	// listings link source files with ?pretty=1 so humans browsing still
-	// land on the highlighted view; direct URLs / curl / <script src> get
-	// the raw bytes. We only honor ?pretty=1 when the file is small enough
-	// to be cheap, looks like text, and chroma can find a lexer for it
-	// (by filename, extension, or content); otherwise fall through to raw.
-	if r.URL.Query().Get("pretty") != "" {
-		if info, err := os.Stat(fsPath); err == nil && info.Size() <= maxHighlightBytes {
-			if src, err := os.ReadFile(fsPath); err == nil && isTextLike(src) {
-				if lexer := pickLexer(filepath.Base(fsPath), src); lexer != nil {
-					h.serveHighlighted(w, r, fsPath, urlPath, src, lexer)
-					return
-				}
+	var buf bytes.Buffer
+	if err := h.md.Convert(src, &buf); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	title := filepath.Base(fsPath)
+	data := pageData{
+		Title:        title,
+		Body:         template.HTML(buf.String()),
+		AssetsPrefix: assetsPrefix,
+		ChromaCSS:    chromaCSS,
+		LiveReload:   h.live,
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := pageTpl.Execute(w, data); err != nil {
+		log.Printf("md-serve: template: %v", err)
+	}
+}
+
+// serveBrowserHTML is the pretty renderer for .html / .htm: hand the file to
+// http.ServeFile so it goes out with Content-Type: text/html and the browser
+// renders it. (The "rendering" happens client-side, but it's still pretty mode
+// from md-serve's perspective — `?pretty=0` is what gets you the source.)
+func (h *fileHandler) serveBrowserHTML(w http.ResponseWriter, r *http.Request, fsPath, urlPath string) {
+	http.ServeFile(w, r, fsPath)
+}
+
+// tryChromaHighlight is the pretty renderer for everything not in the registry.
+// We only highlight when the file is small enough to be cheap, looks like text,
+// and chroma can find a lexer for it (by filename, extension, or content);
+// otherwise we fall through to the raw bytes via http.ServeFile so binaries
+// and unknown formats don't get mangled into a fake "code" page.
+func (h *fileHandler) tryChromaHighlight(w http.ResponseWriter, r *http.Request, fsPath, urlPath string) {
+	if info, err := os.Stat(fsPath); err == nil && info.Size() <= maxHighlightBytes {
+		if src, err := os.ReadFile(fsPath); err == nil && isTextLike(src) {
+			if lexer := pickLexer(filepath.Base(fsPath), src); lexer != nil {
+				h.serveHighlighted(w, r, fsPath, urlPath, src, lexer)
+				return
 			}
 		}
 	}

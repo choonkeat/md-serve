@@ -196,3 +196,30 @@ or a deprecation cycle.
 - If someone hits the "I want both index.html *and* the README rendered
   at /" use case, a `?index=listing` or similar opt-in could be added
   later — but no one has asked for it yet, so we're not building it.
+
+## Update — symmetric `?pretty=` for rendered file types
+
+Original wording above said `.md` / `.markdown` are "*always* rendered to
+HTML." That's no longer true: `?pretty=0` now opts out for any extension
+whose default is rendered.
+
+The query-string semantics are now uniform across all file types, driven
+by a single `prettyRegistry` map of `ext → { renderer, prettyByDefault }`:
+
+- `.md` / `.markdown` / `.html` / `.htm` default to `prettyByDefault=true`.
+  `?pretty=0` (or `false`, `no`, `off`) serves the source as
+  `Content-Type: text/plain` with `X-Content-Type-Options: nosniff`.
+- Everything else defaults to `prettyByDefault=false` and uses chroma as
+  the implicit pretty renderer. `?pretty=1` opts in (with the same
+  size/text-like/lexer-found viability gates as before).
+- The query string is parsed with `strconv.ParseBool`. Invalid or empty
+  values fall back to the extension's default rather than being treated
+  as truthy. This is a small breaking change for callers who relied on
+  the prior `Get("pretty") != ""` check — `?pretty=0` and similar
+  falsy-looking values *used* to trigger highlighting. They no longer do.
+
+Raw mode for `prettyByDefault=true` extensions uses `http.ServeContent`
+rather than `http.ServeFile` because the latter 301-redirects requests
+ending in `/index.html` to the directory form, which would drop the
+forced `text/plain` headers and re-enter the directory's `index.html`
+rendering branch.
