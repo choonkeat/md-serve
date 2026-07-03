@@ -9,10 +9,10 @@ import (
 
 	chromahtml "github.com/alecthomas/chroma/v2/formatters/html"
 	"github.com/yuin/goldmark"
+	highlighting "github.com/yuin/goldmark-highlighting/v2"
 	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
 	gmhtml "github.com/yuin/goldmark/renderer/html"
-	highlighting "github.com/yuin/goldmark-highlighting/v2"
 )
 
 // ----------------------------------------------------------------------------
@@ -311,6 +311,98 @@ func TestChromaRawDoesNotForceNosniff(t *testing.T) {
 	w := roundTrip(t, h, "/x.go", "*/*")
 	if got := w.Header().Get("X-Content-Type-Options"); got == "nosniff" {
 		t.Errorf("unexpectedly forced nosniff on raw .go (header was %q)", got)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Hidden files (dotfiles) — served & listed by default, hidden via
+// -hide-dotfiles (which also 404s direct requests, not just omits listings).
+// ----------------------------------------------------------------------------
+
+func TestHasHiddenSegment(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"/", false},
+		{"/index.md", false},
+		{"/dir/file.txt", false},
+		{"/.env", true},
+		{"/.git", true},
+		{"/.git/config", true},
+		{"/dir/.secret", true},
+		{"/a/.b/c.txt", true},
+		{"/_md-serve-assets/x.css", false}, // underscore prefix is not hidden
+	}
+	for _, tc := range cases {
+		if got := hasHiddenSegment(tc.path); got != tc.want {
+			t.Errorf("hasHiddenSegment(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+// By default dotfiles are revealed: served byte-for-byte on a direct request
+// and included in directory listings.
+func TestHiddenFilesRevealedByDefault(t *testing.T) {
+	h := newTestHandler(t, map[string]string{
+		".env":        "SECRET=1\n",
+		".git/config": "[core]\n",
+		"visible.txt": "hi\n",
+	})
+
+	w := roundTrip(t, h, "/.env", "*/*")
+	if w.Code != 200 {
+		t.Fatalf("GET /.env status = %d, want 200 (body=%q)", w.Code, truncate(w.Body.String(), 200))
+	}
+	if body := w.Body.String(); !strings.Contains(body, "SECRET=1") {
+		t.Errorf("GET /.env body = %q, want the file content", truncate(body, 200))
+	}
+	if w := roundTrip(t, h, "/.git/config", "*/*"); w.Code != 200 {
+		t.Errorf("GET /.git/config status = %d, want 200", w.Code)
+	}
+
+	listing := roundTrip(t, h, "/", "*/*").Body.String()
+	for _, want := range []string{".env", ".git", "visible.txt"} {
+		if !strings.Contains(listing, want) {
+			t.Errorf("listing missing %q\n%s", want, truncate(listing, 500))
+		}
+	}
+}
+
+// With -hide-dotfiles, dotfiles are omitted from listings AND direct requests
+// (including nested dotfile directories) 404 instead of leaking bytes.
+func TestHiddenFilesHiddenWithFlag(t *testing.T) {
+	h := newTestHandler(t, map[string]string{
+		".env":        "SECRET=1\n",
+		".git/config": "[core]\n",
+		"visible.txt": "hi\n",
+	})
+	h.hideDotfiles = true
+
+	for _, target := range []string{"/.env", "/.git/config", "/.git/"} {
+		if w := roundTrip(t, h, target, "*/*"); w.Code != 404 {
+			t.Errorf("GET %s status = %d, want 404 (body=%q)", target, w.Code, truncate(w.Body.String(), 200))
+		}
+	}
+
+	if w := roundTrip(t, h, "/visible.txt", "*/*"); w.Code != 200 {
+		t.Errorf("GET /visible.txt status = %d, want 200", w.Code)
+	}
+
+	listing := roundTrip(t, h, "/", "*/*").Body.String()
+	if strings.Contains(listing, ".env") || strings.Contains(listing, ".git") {
+		t.Errorf("listing should not mention dotfiles\n%s", truncate(listing, 500))
+	}
+	if !strings.Contains(listing, "visible.txt") {
+		t.Errorf("listing missing visible.txt\n%s", truncate(listing, 500))
+	}
+
+	// The live-reload endpoint must not report on hidden paths either.
+	req := httptest.NewRequest("GET", livereloadPath+"?path=/.env", nil)
+	rec := httptest.NewRecorder()
+	h.livereload(rec, req)
+	if rec.Code != 404 {
+		t.Errorf("livereload /.env status = %d, want 404 (body=%q)", rec.Code, truncate(rec.Body.String(), 200))
 	}
 }
 

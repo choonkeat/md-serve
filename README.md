@@ -23,6 +23,7 @@ md-serve                  # serve $PWD on :$PORT (or :8080), live-reload on
 md-serve -dir ./docs      # serve a specific directory
 md-serve -addr :3000      # bind to a specific address
 md-serve -no-live         # disable the live-reload poller
+md-serve -hide-dotfiles   # hide dotfiles (omit from listings, 404 direct requests)
 md-serve -version
 ```
 
@@ -57,7 +58,9 @@ md-serve -version
   bytes regardless of `?pretty=1` or the extension's default. So an
   API consumer asking for `/README.md` with `Accept: application/json`
   gets the source, not an HTML wrapper.
-- Dotfiles are hidden from listings.
+- Dotfiles are served and shown in listings by default. Pass
+  `-hide-dotfiles` to omit them from listings and return `404` for
+  direct requests to any dotfile (or path under a dotfile directory).
 - Path traversal is blocked: requests are rejected if they resolve
   outside the served root.
 - Live-reload is on by default: rendered pages poll a tiny endpoint

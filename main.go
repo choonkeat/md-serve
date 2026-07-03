@@ -26,10 +26,10 @@ import (
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/yuin/goldmark"
+	highlighting "github.com/yuin/goldmark-highlighting/v2"
 	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
 	gmhtml "github.com/yuin/goldmark/renderer/html"
-	highlighting "github.com/yuin/goldmark-highlighting/v2"
 )
 
 // Populated via -ldflags at build time (see scripts/build-platforms.sh).
@@ -273,10 +273,11 @@ func main() {
 		defaultAddr = ":" + p
 	}
 	var (
-		addr    = flag.String("addr", defaultAddr, "address to listen on (defaults to :$PORT if set, else :8080)")
-		dir     = flag.String("dir", ".", "directory to serve")
-		noLive  = flag.Bool("no-live", false, "disable the auto-reload JS poller (live-reload is on by default)")
-		showVer = flag.Bool("version", false, "print version and exit")
+		addr     = flag.String("addr", defaultAddr, "address to listen on (defaults to :$PORT if set, else :8080)")
+		dir      = flag.String("dir", ".", "directory to serve")
+		noLive   = flag.Bool("no-live", false, "disable the auto-reload JS poller (live-reload is on by default)")
+		hideDots = flag.Bool("hide-dotfiles", false, "hide dotfiles: omit them from listings and 404 direct requests (shown by default)")
+		showVer  = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -298,7 +299,9 @@ func main() {
 		fmt.Fprintf(out, "    with Accept: application/json, ...) get raw bytes regardless of pretty.\n")
 		fmt.Fprintf(out, "  • Syntax highlighting respects prefers-color-scheme (github light/dark).\n")
 		fmt.Fprintf(out, "  • Live-reload polls every second; pass -no-live to disable.\n")
-		fmt.Fprintf(out, "  • Dotfiles are hidden; path traversal outside -dir is rejected.\n\n")
+		fmt.Fprintf(out, "  • Dotfiles are served and listed by default; pass -hide-dotfiles to\n")
+		fmt.Fprintf(out, "    omit them from listings and 404 direct requests. Path traversal\n")
+		fmt.Fprintf(out, "    outside -dir is always rejected.\n\n")
 		fmt.Fprintf(out, "Flags:\n")
 		flag.PrintDefaults()
 	}
@@ -330,7 +333,7 @@ func main() {
 	)
 
 	live := !*noLive
-	h := &fileHandler{root: root, md: md, live: live}
+	h := &fileHandler{root: root, md: md, live: live, hideDotfiles: *hideDots}
 	mux := http.NewServeMux()
 	mux.Handle(assetsPrefix, http.StripPrefix(assetsPrefix, http.FileServerFS(mustSub(assetsFS, "assets"))))
 	if live {
@@ -358,13 +361,34 @@ func mustSub(f embed.FS, dir string) fs.FS {
 }
 
 type fileHandler struct {
-	root string
-	md   goldmark.Markdown
-	live bool
+	root         string
+	md           goldmark.Markdown
+	live         bool
+	hideDotfiles bool // when true, dotfiles are 404'd and omitted from listings
+}
+
+// hasHiddenSegment reports whether any component of the cleaned URL path is a
+// dotfile (begins with "."). Used to gate access when -hide-dotfiles is set.
+// urlPath is already path.Clean'd and starts with "/", so "." and ".." have
+// been resolved away and the empty leading/trailing segments don't match.
+func hasHiddenSegment(urlPath string) bool {
+	for _, seg := range strings.Split(urlPath, "/") {
+		if strings.HasPrefix(seg, ".") {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	urlPath := path.Clean("/" + r.URL.Path)
+	// When -hide-dotfiles is set, a request for any dotfile path (or a path
+	// under a dotfile directory) is treated as if it doesn't exist, so we
+	// don't leak bytes the listing already omits.
+	if h.hideDotfiles && hasHiddenSegment(urlPath) {
+		http.NotFound(w, r)
+		return
+	}
 	fsPath, ok := safeJoin(h.root, urlPath)
 	if !ok {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -548,8 +572,9 @@ func (h *fileHandler) tryChromaHighlight(w http.ResponseWriter, r *http.Request,
 
 // listingHTML builds an HTML <table> of the directory contents as a
 // markdown-body fragment with Name / Size / Modified columns. Includes a
-// parent "../" link when urlPath is not the root. Dotfiles are skipped.
-// Directories are sorted before files; within each group, alphabetically.
+// parent "../" link when urlPath is not the root. Dotfiles are included
+// unless -hide-dotfiles is set. Directories are sorted before files; within
+// each group, alphabetically.
 func (h *fileHandler) listingHTML(fsPath, urlPath string) (template.HTML, error) {
 	entries, err := os.ReadDir(fsPath)
 	if err != nil {
@@ -572,7 +597,7 @@ func (h *fileHandler) listingHTML(fsPath, urlPath string) (template.HTML, error)
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if strings.HasPrefix(name, ".") {
+		if h.hideDotfiles && strings.HasPrefix(name, ".") {
 			continue
 		}
 		display := name
@@ -799,9 +824,9 @@ func isTextLike(content []byte) bool {
 // livereload returns the source-file mtime (as Unix nanos) for the page
 // at ?path=<url-path>, so the injected live-reload JS can poll and reload
 // when the value changes. For directories the result is the max mtime across
-// the dir itself and its immediate non-dotfile entries — that's enough
-// to catch both content edits to the rendered README and add/remove of
-// files in the listing.
+// the dir itself and its immediate entries (dotfiles included unless
+// -hide-dotfiles is set) — that's enough to catch both content edits to the
+// rendered README and add/remove of files in the listing.
 func (h *fileHandler) livereload(w http.ResponseWriter, r *http.Request) {
 	urlPath := r.URL.Query().Get("path")
 	if urlPath == "" {
@@ -809,6 +834,10 @@ func (h *fileHandler) livereload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cleaned := path.Clean("/" + urlPath)
+	if h.hideDotfiles && hasHiddenSegment(cleaned) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
 	fsPath, ok := safeJoin(h.root, cleaned)
 	if !ok {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -823,7 +852,7 @@ func (h *fileHandler) livereload(w http.ResponseWriter, r *http.Request) {
 	if info.IsDir() {
 		if entries, err := os.ReadDir(fsPath); err == nil {
 			for _, e := range entries {
-				if strings.HasPrefix(e.Name(), ".") {
+				if h.hideDotfiles && strings.HasPrefix(e.Name(), ".") {
 					continue
 				}
 				if i, err := e.Info(); err == nil {
