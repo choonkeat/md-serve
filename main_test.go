@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -311,6 +312,169 @@ func TestChromaRawDoesNotForceNosniff(t *testing.T) {
 	w := roundTrip(t, h, "/x.go", "*/*")
 	if got := w.Header().Get("X-Content-Type-Options"); got == "nosniff" {
 		t.Errorf("unexpectedly forced nosniff on raw .go (header was %q)", got)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Combined directory pages: a "Home / README.md" breadcrumb over the rendered
+// README, with the bare file listing one click away at ?listing=1.
+// ----------------------------------------------------------------------------
+
+// A directory with a markdown index renders the README under a breadcrumb —
+// not the old inline listing table — and the "Home" crumb points at ?listing=1.
+func TestCombinedDirShowsBreadcrumbNotListing(t *testing.T) {
+	h := newTestHandler(t, map[string]string{
+		"README.md": "# Project\n\nrendered readme body.\n",
+		"other.txt": "hello\n",
+	})
+	body := roundTrip(t, h, "/", "text/html").Body.String()
+
+	for _, want := range []string{
+		`<p class="md-serve-breadcrumb">`,
+		`href="?listing=1"`,
+		"Home",
+		"README.md",
+		"rendered readme body.", // the README is rendered inline
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("combined page missing %q\n%s", want, truncate(body, 500))
+		}
+	}
+	// The full listing table no longer appears on the combined page. (Match the
+	// actual table element, not the class name, which the stylesheet defines.)
+	for _, notWant := range []string{`<table class="md-serve-listing">`, "Files in", "other.txt"} {
+		if strings.Contains(body, notWant) {
+			t.Errorf("combined page should not contain %q\n%s", notWant, truncate(body, 500))
+		}
+	}
+}
+
+// ?listing=1 forces the bare file listing, bypassing both the combined README
+// page and (crucially) an index.html that would otherwise pass through.
+func TestListingQueryForcesFileListing(t *testing.T) {
+	h := newTestHandler(t, map[string]string{
+		"README.md":  "# Project\n\nrendered readme body.\n",
+		"index.html": "<h1>Static home</h1>\n",
+		"other.txt":  "hello\n",
+	})
+
+	// Without ?listing, index.html wins (matches every static host).
+	plain := roundTrip(t, h, "/", "text/html").Body.String()
+	if !strings.Contains(plain, "Static home") {
+		t.Errorf("expected index.html passthrough at /\n%s", truncate(plain, 500))
+	}
+
+	// With ?listing=1, we get the generated listing regardless of index.html.
+	listing := roundTrip(t, h, "/?listing=1", "text/html").Body.String()
+	for _, want := range []string{`<table class="md-serve-listing">`, "Index of", "other.txt", "README.md"} {
+		if !strings.Contains(listing, want) {
+			t.Errorf("?listing=1 missing %q\n%s", want, truncate(listing, 500))
+		}
+	}
+	for _, notWant := range []string{"Static home", "rendered readme body.", `<p class="md-serve-breadcrumb">`} {
+		if strings.Contains(listing, notWant) {
+			t.Errorf("?listing=1 should not contain %q\n%s", notWant, truncate(listing, 500))
+		}
+	}
+}
+
+// ----------------------------------------------------------------------------
+// -theme-cookie: pin light/dark from a request cookie (server-side), so a host
+// like swe-swe can make md-serve match its own theme. Unset = follow the
+// browser's prefers-color-scheme (unchanged default behavior).
+// ----------------------------------------------------------------------------
+
+// roundTripCookie is roundTrip plus a single request cookie.
+func roundTripCookie(t *testing.T, h *fileHandler, target, accept, cname, cval string) *httptest.ResponseRecorder {
+	t.Helper()
+	r := httptest.NewRequest("GET", target, nil)
+	if accept != "" {
+		r.Header.Set("Accept", accept)
+	}
+	if cname != "" {
+		r.AddCookie(&http.Cookie{Name: cname, Value: cval})
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w
+}
+
+func TestThemeCookiePinsTheme(t *testing.T) {
+	files := map[string]string{"test.md": "# Hi\n\n```go\nvar x = 1\n```\n"}
+
+	// A handler with -theme-cookie set: the cookie now drives the theme.
+	pinned := newTestHandler(t, files)
+	pinned.themeCookie = "swe-swe-theme"
+
+	// A handler with -theme-cookie unset: cookie is ignored, always auto.
+	off := newTestHandler(t, files)
+
+	type check struct {
+		has    []string
+		notHas []string
+	}
+	cases := []struct {
+		name string
+		h    *fileHandler
+		cval string // "" means send no cookie
+		want check
+	}{
+		{
+			name: "pinned/dark",
+			h:    pinned, cval: "dark",
+			want: check{
+				has:    []string{"github-markdown-dark.css", "color-scheme: dark;"},
+				notHas: []string{"github-markdown.css\"", "prefers-color-scheme"},
+			},
+		},
+		{
+			name: "pinned/light",
+			h:    pinned, cval: "light",
+			want: check{
+				has:    []string{"github-markdown-light.css", "color-scheme: light;"},
+				notHas: []string{"github-markdown.css\"", "prefers-color-scheme", "#0d1117"},
+			},
+		},
+		{
+			name: "pinned/unrecognized-value falls back to auto",
+			h:    pinned, cval: "chartreuse",
+			want: check{
+				has:    []string{"github-markdown.css\"", "color-scheme: light dark;", "prefers-color-scheme"},
+				notHas: []string{"github-markdown-dark.css"},
+			},
+		},
+		{
+			name: "pinned/no-cookie falls back to auto",
+			h:    pinned, cval: "",
+			want: check{
+				has:    []string{"github-markdown.css\"", "color-scheme: light dark;", "prefers-color-scheme"},
+				notHas: []string{"github-markdown-dark.css"},
+			},
+		},
+		{
+			name: "flag-off/dark-cookie is ignored (auto)",
+			h:    off, cval: "dark",
+			want: check{
+				has:    []string{"github-markdown.css\"", "color-scheme: light dark;", "prefers-color-scheme"},
+				notHas: []string{"github-markdown-dark.css"},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := roundTripCookie(t, tc.h, "/test.md", "text/html", "swe-swe-theme", tc.cval).Body.String()
+			for _, want := range tc.want.has {
+				if !strings.Contains(body, want) {
+					t.Errorf("missing %q\n%s", want, truncate(body, 400))
+				}
+			}
+			for _, notWant := range tc.want.notHas {
+				if strings.Contains(body, notWant) {
+					t.Errorf("unexpectedly contains %q\n%s", notWant, truncate(body, 400))
+				}
+			}
+		})
 	}
 }
 

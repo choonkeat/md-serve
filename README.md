@@ -4,6 +4,17 @@ Tiny static file server that renders Markdown (`.md`, `.markdown`) as
 GitHub-styled HTML. Single Go binary, distributed via npm with native
 binaries for Linux / macOS / Windows on x64 and arm64.
 
+## Protip: query strings
+
+A few query strings change how a URL is served — handy when the default
+rendering isn't what you want:
+
+| Append to a URL | What you get |
+| --- | --- |
+| `?listing=1` | The bare file listing for a directory — even when an `index.html` or `README.md` would otherwise take over. This is what the **Home** breadcrumb links to. |
+| `?pretty=0` | The **raw source** of a file that normally renders — e.g. `README.md?pretty=0` or `index.html?pretty=0` returns the bytes as `text/plain` instead of the rendered page. |
+| `?pretty=1` | A **syntax-highlighted** view of a source file, with linkable line numbers (e.g. `main.go?pretty=1#L42`). |
+
 ## Install
 
 ```sh
@@ -24,6 +35,7 @@ md-serve -dir ./docs      # serve a specific directory
 md-serve -addr :3000      # bind to a specific address
 md-serve -no-live         # disable the live-reload poller
 md-serve -hide-dotfiles   # hide dotfiles (omit from listings, 404 direct requests)
+md-serve -theme-cookie swe-swe-theme  # pin light/dark from a request cookie
 md-serve -version
 ```
 
@@ -37,9 +49,12 @@ md-serve -version
 - Directories: if `index.html` is present it's served raw (matches
   nginx / Apache / Caddy / GitHub Pages, so md-serve can host real
   static apps). Otherwise, if `index.md` / `README.md` / `readme.md` /
-  `index.markdown` is present, a combined page renders the directory
-  listing on top and the rendered README below GitHub-style. Otherwise
-  a plain generated listing with **Name / Size / Modified** columns.
+  `index.markdown` is present, it's rendered GitHub-style under a
+  `Home / <file>` breadcrumb — the **Home** crumb (a link to
+  `?listing=1`) drops you to the bare file listing. Otherwise a plain
+  generated listing with **Name / Size / Modified** columns. Appending
+  `?listing=1` to any directory URL forces that listing, bypassing
+  `index.html` too.
 - Everything else is served byte-for-byte. That means `.js`, `.css`,
   `.wasm`, `.json`, images, fonts, and the rest all reach the browser
   with their normal MIME types — ES module scripts load, fetch() works,
@@ -58,6 +73,12 @@ md-serve -version
   bytes regardless of `?pretty=1` or the extension's default. So an
   API consumer asking for `/README.md` with `Accept: application/json`
   gets the source, not an HTML wrapper.
+- Theme follows the browser's `prefers-color-scheme` (GitHub light /
+  dark) out of the box. Pass `-theme-cookie NAME` to instead pin the
+  theme from a request cookie whose value is `light` or `dark` — e.g.
+  `-theme-cookie swe-swe-theme` so md-serve matches a host UI that
+  already sets that cookie. No cookie (or an unrecognized value) falls
+  back to following the browser.
 - Dotfiles are served and shown in listings by default. Pass
   `-hide-dotfiles` to omit them from listings and return `404` for
   direct requests to any dotfile (or path under a dotfile directory).

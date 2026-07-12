@@ -79,27 +79,33 @@ func pickChromaStyle(name string) *chroma.Style {
 	return styles.Fallback
 }
 
-// chromaCSS is generated once at init time and inlined into every page.
-// It carries chroma's "github" (light) syntax stylesheet followed by the
-// "github-dark" stylesheet wrapped in @media (prefers-color-scheme: dark),
-// so highlighted code blocks track the user's mode instead of staying
-// frozen in the light theme. Each rule is scoped under .markdown-body so
-// chroma's background beats github-markdown.css's `.markdown-body pre`
-// rule, which would otherwise mask chroma's per-mode colours.
-var chromaCSS = func() template.CSS {
-	var b strings.Builder
-	var light bytes.Buffer
-	if err := chromaFormatter.WriteCSS(&light, chromaLightStyle); err == nil {
-		b.WriteString(scopeChromaCSS(light.String()))
+// chromaCSSAuto / chromaCSSLight / chromaCSSDark are the three syntax
+// stylesheets inlined into a page, one chosen per resolved theme (see
+// themeFor). Each rule is scoped under .markdown-body so chroma's background
+// beats github-markdown.css's `.markdown-body pre` rule, which would otherwise
+// mask chroma's per-mode colours.
+//
+//   - auto:  the "github" (light) stylesheet, then "github-dark" wrapped in
+//     @media (prefers-color-scheme: dark), so code blocks track the OS mode.
+//   - light: only the light stylesheet — the theme is pinned, so no media query.
+//   - dark:  only the dark stylesheet, applied unconditionally.
+var (
+	chromaCSSLight = template.CSS(scopedChromaStyle(chromaLightStyle))
+	chromaCSSDark  = template.CSS(scopedChromaStyle(chromaDarkStyle))
+	chromaCSSAuto  = template.CSS(string(chromaCSSLight) +
+		"\n@media (prefers-color-scheme: dark) {\n" + string(chromaCSSDark) + "}\n")
+)
+
+// scopedChromaStyle renders one chroma style to CSS and scopes it under
+// .markdown-body. Returns "" if chroma fails to emit (never observed for the
+// built-in github styles, but we don't want a broken page if it does).
+func scopedChromaStyle(style *chroma.Style) string {
+	var buf bytes.Buffer
+	if err := chromaFormatter.WriteCSS(&buf, style); err != nil {
+		return ""
 	}
-	var dark bytes.Buffer
-	if err := chromaFormatter.WriteCSS(&dark, chromaDarkStyle); err == nil {
-		b.WriteString("\n@media (prefers-color-scheme: dark) {\n")
-		b.WriteString(scopeChromaCSS(dark.String()))
-		b.WriteString("}\n")
-	}
-	return template.CSS(b.String())
-}()
+	return scopeChromaCSS(buf.String())
+}
 
 // scopeChromaCSS prefixes every chroma class selector with .markdown-body
 // so the rules outweigh github-markdown.css's `.markdown-body pre` styling.
@@ -109,18 +115,76 @@ func scopeChromaCSS(css string) string {
 	return strings.ReplaceAll(css, ".chroma", ".markdown-body .chroma")
 }
 
+// Resolved theme modes. themeAuto follows the browser's prefers-color-scheme
+// (the default, and md-serve's only behavior when -theme-cookie is unset);
+// themeLight / themeDark pin the theme, chosen from a request cookie.
+const (
+	themeAuto  = "auto"
+	themeLight = "light"
+	themeDark  = "dark"
+)
+
+// chromeDarkRules are the dark-mode overrides for md-serve's own chrome — the
+// page background, breadcrumb / source labels, and width widget — i.e. the
+// bits github-markdown.css doesn't theme for us. They're emitted either inside
+// an @media (prefers-color-scheme: dark) block (auto theme) or unconditionally
+// (dark theme pinned by cookie); see themeFor.
+const chromeDarkRules = `
+    /* Match the body to the .markdown-body dark background so the 45px
+       padding around the article doesn't show a tonal seam against the
+       browser's UA-default dark canvas. */
+    body { background: #0d1117; }
+    /* The README/source label between the listing and the rendered file
+       is the only piece of chrome whose color isn't already dark-mode
+       aware via github-markdown.css. #57606a is invisible on #0d1117. */
+    .markdown-body p.md-serve-readme-source { color: #8b949e; }
+    .markdown-body p.md-serve-breadcrumb { border-bottom-color: #30363d; }
+    .markdown-body p.md-serve-breadcrumb .md-serve-breadcrumb-sep { color: #8b949e; }
+    .md-serve-width-ctrl > summary,
+    .md-serve-width-panel { background: #161b22; border-color: #30363d; color: #8b949e; }
+    .md-serve-width-panel button { background: #21262d; border-color: #30363d; color: #c9d1d9; }
+    .md-serve-width-panel button:hover { background: #30363d; }
+`
+
+var (
+	chromeDarkAuto   = template.CSS("@media (prefers-color-scheme: dark) {\n" + chromeDarkRules + "  }\n")
+	chromeDarkForced = template.CSS(chromeDarkRules)
+)
+
+// themeAssets bundles the per-theme pieces the page template interpolates.
+type themeAssets struct {
+	MarkdownCSS   string       // github-markdown stylesheet filename to link
+	ChromaCSS     template.CSS // syntax-highlight stylesheet
+	ChromeDarkCSS template.CSS // dark overrides for md-serve's own chrome
+	ColorScheme   string       // value for the CSS `color-scheme:` property
+}
+
+// themeFor maps a resolved theme mode to the stylesheets and color-scheme a
+// page should use. Any mode other than light/dark is treated as auto.
+func themeFor(mode string) themeAssets {
+	switch mode {
+	case themeLight:
+		return themeAssets{"github-markdown-light.css", chromaCSSLight, "", "light"}
+	case themeDark:
+		return themeAssets{"github-markdown-dark.css", chromaCSSDark, chromeDarkForced, "dark"}
+	default:
+		return themeAssets{"github-markdown.css", chromaCSSAuto, chromeDarkAuto, "light dark"}
+	}
+}
+
 var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}}</title>
-<link rel="stylesheet" href="{{.AssetsPrefix}}github-markdown.css">
+<link rel="stylesheet" href="{{.AssetsPrefix}}{{.MarkdownCSS}}">
 <style>{{.ChromaCSS}}</style>
 <style>
-  /* Tell the browser we support both schemes so scrollbars, form controls,
-     and other UA-rendered chrome adapt to the user's preference. */
-  :root { color-scheme: light dark; }
+  /* Advertise which scheme(s) we support so scrollbars, form controls, and
+     other UA-rendered chrome adapt. "light dark" when the theme follows the
+     OS; a single value when a cookie has pinned the theme. */
+  :root { color-scheme: {{.ColorScheme}}; }
   body { box-sizing: border-box; min-width: 200px; max-width: var(--md-max-width, 980px); margin: 0 auto; padding: 45px; }
   @media (max-width: 767px) { body { padding: 15px; } }
   /* Directory listing: full-width table that wraps the name column and
@@ -131,6 +195,12 @@ var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
   .markdown-body table.md-serve-listing th:nth-child(n+2),
   .markdown-body table.md-serve-listing td:nth-child(n+2) { white-space: nowrap; }
   .markdown-body p.md-serve-readme-source { margin: 16px 0 8px 0; font-size: 13px; color: #57606a; }
+  /* Breadcrumb above a rendered README ("Home / README.md"). Sits a touch
+     larger than the source label and gains a bottom border so it reads as a
+     header strip separating navigation from the document. */
+  .markdown-body p.md-serve-breadcrumb { margin: 0 0 20px 0; padding-bottom: 12px;
+    font-size: 14px; border-bottom: 1px solid #d0d7de; }
+  .markdown-body p.md-serve-breadcrumb .md-serve-breadcrumb-sep { color: #57606a; margin: 0 2px; }
   /* Reader-controlled page width widget. Subtle until hovered, bottom-right
      fixed, never affects document layout. Persists choice in localStorage so
      it survives reloads and applies before paint via the head script below. */
@@ -154,20 +224,7 @@ var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
   .md-serve-width-panel button { flex: 1; background: #f6f8fa; border: 1px solid #d0d7de;
     border-radius: 4px; padding: 4px 8px; cursor: pointer; font: inherit; color: #24292f; }
   .md-serve-width-panel button:hover { background: #eef1f4; }
-  @media (prefers-color-scheme: dark) {
-    /* Match the body to the .markdown-body dark background so the 45px
-       padding around the article doesn't show a tonal seam against the
-       browser's UA-default dark canvas. */
-    body { background: #0d1117; }
-    /* The README/source label between the listing and the rendered file
-       is the only piece of chrome whose color isn't already dark-mode
-       aware via github-markdown.css. #57606a is invisible on #0d1117. */
-    .markdown-body p.md-serve-readme-source { color: #8b949e; }
-    .md-serve-width-ctrl > summary,
-    .md-serve-width-panel { background: #161b22; border-color: #30363d; color: #8b949e; }
-    .md-serve-width-panel button { background: #21262d; border-color: #30363d; color: #c9d1d9; }
-    .md-serve-width-panel button:hover { background: #30363d; }
-  }
+  {{.ChromeDarkCSS}}
 </style>
 <script>
 /* Apply stored width before <body> paints, to avoid a flash at the default. */
@@ -258,11 +315,14 @@ var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
 `))
 
 type pageData struct {
-	Title        string
-	Body         template.HTML
-	AssetsPrefix string
-	ChromaCSS    template.CSS
-	LiveReload   bool
+	Title         string
+	Body          template.HTML
+	AssetsPrefix  string
+	MarkdownCSS   string
+	ChromaCSS     template.CSS
+	ChromeDarkCSS template.CSS
+	ColorScheme   string
+	LiveReload    bool
 }
 
 func main() {
@@ -273,11 +333,12 @@ func main() {
 		defaultAddr = ":" + p
 	}
 	var (
-		addr     = flag.String("addr", defaultAddr, "address to listen on (defaults to :$PORT if set, else :8080)")
-		dir      = flag.String("dir", ".", "directory to serve")
-		noLive   = flag.Bool("no-live", false, "disable the auto-reload JS poller (live-reload is on by default)")
-		hideDots = flag.Bool("hide-dotfiles", false, "hide dotfiles: omit them from listings and 404 direct requests (shown by default)")
-		showVer  = flag.Bool("version", false, "print version and exit")
+		addr      = flag.String("addr", defaultAddr, "address to listen on (defaults to :$PORT if set, else :8080)")
+		dir       = flag.String("dir", ".", "directory to serve")
+		noLive    = flag.Bool("no-live", false, "disable the auto-reload JS poller (live-reload is on by default)")
+		hideDots  = flag.Bool("hide-dotfiles", false, "hide dotfiles: omit them from listings and 404 direct requests (shown by default)")
+		themeCkie = flag.String("theme-cookie", "", "cookie name that pins light/dark theme (e.g. swe-swe-theme); empty = follow the browser's prefers-color-scheme")
+		showVer   = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -286,7 +347,9 @@ func main() {
 		fmt.Fprintf(out, "Behavior:\n")
 		fmt.Fprintf(out, "  • .md / .markdown render as GitHub-styled HTML (GFM, syntax-highlighted code blocks).\n")
 		fmt.Fprintf(out, "  • Directories: index.html wins; otherwise index.md / README.md is rendered\n")
-		fmt.Fprintf(out, "    below an auto-generated file listing; otherwise just the listing.\n")
+		fmt.Fprintf(out, "    under a 'Home / <file>' breadcrumb; otherwise an auto-generated listing.\n")
+		fmt.Fprintf(out, "    Append ?listing=1 to any directory URL to force the bare file listing\n")
+		fmt.Fprintf(out, "    (this is what the 'Home' breadcrumb links to; it also bypasses index.html).\n")
 		fmt.Fprintf(out, "  • Everything else is served byte-for-byte (.js, .css, .wasm, .json, images,\n")
 		fmt.Fprintf(out, "    fonts, ...) so ES module scripts and static apps Just Work.\n")
 		fmt.Fprintf(out, "  • Append ?pretty=1 to a source-file URL for a syntax-highlighted view with\n")
@@ -297,7 +360,9 @@ func main() {
 		fmt.Fprintf(out, "    instead of the rendered page (Content-Type: text/plain).\n")
 		fmt.Fprintf(out, "  • Clients whose Accept header doesn't include text/html (curl -H, fetch\n")
 		fmt.Fprintf(out, "    with Accept: application/json, ...) get raw bytes regardless of pretty.\n")
-		fmt.Fprintf(out, "  • Syntax highlighting respects prefers-color-scheme (github light/dark).\n")
+		fmt.Fprintf(out, "  • Theme follows the browser's prefers-color-scheme (github light/dark).\n")
+		fmt.Fprintf(out, "    Pass -theme-cookie NAME to instead pin the theme from a request cookie\n")
+		fmt.Fprintf(out, "    (value light/dark), e.g. -theme-cookie swe-swe-theme to match a host UI.\n")
 		fmt.Fprintf(out, "  • Live-reload polls every second; pass -no-live to disable.\n")
 		fmt.Fprintf(out, "  • Dotfiles are served and listed by default; pass -hide-dotfiles to\n")
 		fmt.Fprintf(out, "    omit them from listings and 404 direct requests. Path traversal\n")
@@ -333,7 +398,7 @@ func main() {
 	)
 
 	live := !*noLive
-	h := &fileHandler{root: root, md: md, live: live, hideDotfiles: *hideDots}
+	h := &fileHandler{root: root, md: md, live: live, hideDotfiles: *hideDots, themeCookie: *themeCkie}
 	mux := http.NewServeMux()
 	mux.Handle(assetsPrefix, http.StripPrefix(assetsPrefix, http.FileServerFS(mustSub(assetsFS, "assets"))))
 	if live {
@@ -364,7 +429,41 @@ type fileHandler struct {
 	root         string
 	md           goldmark.Markdown
 	live         bool
-	hideDotfiles bool // when true, dotfiles are 404'd and omitted from listings
+	hideDotfiles bool   // when true, dotfiles are 404'd and omitted from listings
+	themeCookie  string // when non-empty, this request cookie pins light/dark; else follow prefers-color-scheme
+}
+
+// themeMode resolves the theme for a request. With -theme-cookie unset it's
+// always themeAuto (follow the browser). Otherwise a cookie of that name whose
+// value is "light" or "dark" pins the theme; anything else falls back to auto.
+func (h *fileHandler) themeMode(r *http.Request) string {
+	if h.themeCookie == "" {
+		return themeAuto
+	}
+	if c, err := r.Cookie(h.themeCookie); err == nil {
+		switch c.Value {
+		case themeLight, themeDark:
+			return c.Value
+		}
+	}
+	return themeAuto
+}
+
+// newPageData builds a pageData with the fields common to every rendered page
+// (assets, resolved-theme stylesheets, live-reload) filled in, so each render
+// path only has to supply the title and body.
+func (h *fileHandler) newPageData(r *http.Request, title string, body template.HTML) pageData {
+	ta := themeFor(h.themeMode(r))
+	return pageData{
+		Title:         title,
+		Body:          body,
+		AssetsPrefix:  assetsPrefix,
+		MarkdownCSS:   ta.MarkdownCSS,
+		ChromaCSS:     ta.ChromaCSS,
+		ChromeDarkCSS: ta.ChromeDarkCSS,
+		ColorScheme:   ta.ColorScheme,
+		LiveReload:    h.live,
+	}
 }
 
 // hasHiddenSegment reports whether any component of the cleaned URL path is a
@@ -426,7 +525,16 @@ func (h *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 //     with the directory listing at the top and the rendered README
 //     below.
 //  3. Else, serve the auto-generated directory listing.
+//
+// The ?listing=1 escape hatch forces rule 3 unconditionally: it's what the
+// "Home" breadcrumb on a combined page links to, so the reader can always get
+// back to the bare file listing — even in a directory whose index.html would
+// otherwise pass through and hide it entirely.
 func (h *fileHandler) serveDir(w http.ResponseWriter, r *http.Request, fsPath, urlPath string) {
+	if b, err := strconv.ParseBool(r.URL.Query().Get("listing")); err == nil && b {
+		h.serveDirIndex(w, r, fsPath, urlPath)
+		return
+	}
 	// 1. index.html → raw pass-through (matches every other static host)
 	indexHTML := filepath.Join(fsPath, "index.html")
 	if s, err := os.Stat(indexHTML); err == nil && !s.IsDir() {
@@ -532,13 +640,7 @@ func (h *fileHandler) renderMarkdownPage(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	title := filepath.Base(fsPath)
-	data := pageData{
-		Title:        title,
-		Body:         template.HTML(buf.String()),
-		AssetsPrefix: assetsPrefix,
-		ChromaCSS:    chromaCSS,
-		LiveReload:   h.live,
-	}
+	data := h.newPageData(r, title, template.HTML(buf.String()))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := pageTpl.Execute(w, data); err != nil {
 		log.Printf("md-serve: template: %v", err)
@@ -654,26 +756,16 @@ func (h *fileHandler) serveDirIndex(w http.ResponseWriter, r *http.Request, fsPa
 	}
 	body := fmt.Sprintf(`<h1 id="index-of">Index of %s</h1>%s`,
 		html.EscapeString(urlPath), string(listing))
-	data := pageData{
-		Title:        "Index of " + urlPath,
-		Body:         template.HTML(body),
-		AssetsPrefix: assetsPrefix,
-		ChromaCSS:    chromaCSS,
-		LiveReload:   h.live,
-	}
+	data := h.newPageData(r, "Index of "+urlPath, template.HTML(body))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = pageTpl.Execute(w, data)
 }
 
-// serveCombinedDir renders a directory as a single page containing the
-// file listing on top and the rendered README below, styled after
-// github.com's repo-home layout.
+// serveCombinedDir renders a directory as a single page: a breadcrumb across
+// the top, then the rendered README below, styled after github.com's repo-home
+// layout. The full file listing isn't shown inline — the "Home" crumb links to
+// it (?listing=1) so the README leads and the listing is one click away.
 func (h *fileHandler) serveCombinedDir(w http.ResponseWriter, r *http.Request, fsPath, urlPath, readmePath string) {
-	listing, err := h.listingHTML(fsPath, urlPath)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
 	src, err := os.ReadFile(readmePath)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -684,26 +776,17 @@ func (h *fileHandler) serveCombinedDir(w http.ResponseWriter, r *http.Request, f
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// Listing block labelled with the current path, then a horizontal rule,
-	// then a small label naming the README file we picked, then its
-	// rendered content. The label is a link to the file itself so the user
-	// can open it on its own page.
+	// Breadcrumb: "Home / README.md", then the rendered README. "Home" points
+	// at ?listing=1 (the bare file listing for this directory); the filename
+	// crumb links to the README on its own page.
 	readmeName := filepath.Base(readmePath)
 	body := fmt.Sprintf(
-		`<h2 id="md-serve-dir-listing" style="margin-top:0">Files in %s</h2>%s<hr><p class="md-serve-readme-source"><a href="%s">%s</a></p>%s`,
-		html.EscapeString(urlPath),
-		string(listing),
+		`<p class="md-serve-breadcrumb"><a href="?listing=1">Home</a> <span class="md-serve-breadcrumb-sep">/</span> <a href="%s">%s</a></p>%s`,
 		html.EscapeString(readmeName),
 		html.EscapeString(readmeName),
 		readme.String(),
 	)
-	data := pageData{
-		Title:        readmeName + " — " + urlPath,
-		Body:         template.HTML(body),
-		AssetsPrefix: assetsPrefix,
-		ChromaCSS:    chromaCSS,
-		LiveReload:   h.live,
-	}
+	data := h.newPageData(r, readmeName+" — "+urlPath, template.HTML(body))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = pageTpl.Execute(w, data)
 }
@@ -736,13 +819,7 @@ func (h *fileHandler) serveHighlighted(w http.ResponseWriter, r *http.Request, f
 		rawHref,
 		code.String(),
 	)
-	data := pageData{
-		Title:        name + " — " + urlPath,
-		Body:         template.HTML(body),
-		AssetsPrefix: assetsPrefix,
-		ChromaCSS:    chromaCSS,
-		LiveReload:   h.live,
-	}
+	data := h.newPageData(r, name+" — "+urlPath, template.HTML(body))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = pageTpl.Execute(w, data)
 }
