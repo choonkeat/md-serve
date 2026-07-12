@@ -125,7 +125,7 @@ const (
 )
 
 // chromeDarkRules are the dark-mode overrides for md-serve's own chrome — the
-// page background, breadcrumb / source labels, and width widget — i.e. the
+// page background, file-list / source labels, and width widget — i.e. the
 // bits github-markdown.css doesn't theme for us. They're emitted either inside
 // an @media (prefers-color-scheme: dark) block (auto theme) or unconditionally
 // (dark theme pinned by cookie); see themeFor.
@@ -138,8 +138,12 @@ const chromeDarkRules = `
        is the only piece of chrome whose color isn't already dark-mode
        aware via github-markdown.css. #57606a is invisible on #0d1117. */
     .markdown-body p.md-serve-readme-source { color: #8b949e; }
-    .markdown-body p.md-serve-breadcrumb { border-bottom-color: #30363d; }
-    .markdown-body p.md-serve-breadcrumb .md-serve-breadcrumb-sep { color: #8b949e; }
+    .markdown-body details.md-serve-files { border-bottom-color: #30363d; }
+    .markdown-body details.md-serve-files .md-serve-files-tri,
+    .markdown-body details.md-serve-files .md-serve-files-meta { color: #8b949e; }
+    .markdown-body details.md-serve-files .md-serve-files-glyph { color: #58a6ff; }
+    .markdown-body details.md-serve-files .md-serve-files-dir,
+    .markdown-body details.md-serve-files .md-serve-files-name { color: #c9d1d9; }
     .md-serve-width-ctrl > summary,
     .md-serve-width-panel { background: #161b22; border-color: #30363d; color: #8b949e; }
     .md-serve-width-panel button { background: #21262d; border-color: #30363d; color: #c9d1d9; }
@@ -195,12 +199,23 @@ var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
   .markdown-body table.md-serve-listing th:nth-child(n+2),
   .markdown-body table.md-serve-listing td:nth-child(n+2) { white-space: nowrap; }
   .markdown-body p.md-serve-readme-source { margin: 16px 0 8px 0; font-size: 13px; color: #57606a; }
-  /* Breadcrumb above a rendered README ("Home / README.md"). Sits a touch
-     larger than the source label and gains a bottom border so it reads as a
-     header strip separating navigation from the document. */
-  .markdown-body p.md-serve-breadcrumb { margin: 0 0 20px 0; padding-bottom: 12px;
-    font-size: 14px; border-bottom: 1px solid #d0d7de; }
-  .markdown-body p.md-serve-breadcrumb .md-serve-breadcrumb-sep { color: #57606a; margin: 0 2px; }
+  /* Collapsible file list above a rendered README. Not a breadcrumb: a
+     <details> disclosure whose summary reads "☰ N files · M folders in dir …
+     README.md". A bottom border makes it a header strip separating navigation
+     from the document; expanding it drops the listing table in inline. */
+  .markdown-body details.md-serve-files { margin: 0 0 20px 0; padding-bottom: 12px;
+    border-bottom: 1px solid #d0d7de; }
+  .markdown-body details.md-serve-files > summary { list-style: none; cursor: pointer;
+    user-select: none; display: flex; align-items: center; font-size: 14px; }
+  .markdown-body details.md-serve-files > summary::-webkit-details-marker { display: none; }
+  .markdown-body details.md-serve-files .md-serve-files-tri { width: 14px; font-size: 11px;
+    color: #57606a; transition: transform 0.12s ease; }
+  .markdown-body details.md-serve-files[open] > summary .md-serve-files-tri { transform: rotate(90deg); }
+  .markdown-body details.md-serve-files .md-serve-files-glyph { color: #0969da; margin-right: 7px; }
+  .markdown-body details.md-serve-files .md-serve-files-meta { color: #57606a; }
+  .markdown-body details.md-serve-files .md-serve-files-dir { color: #24292f; }
+  .markdown-body details.md-serve-files .md-serve-files-name { margin-left: auto; padding-left: 16px; color: #24292f; }
+  .markdown-body details.md-serve-files table.md-serve-listing { margin-top: 12px; margin-bottom: 0; }
   /* Reader-controlled page width widget. Subtle until hovered, bottom-right
      fixed, never affects document layout. Persists choice in localStorage so
      it survives reloads and applies before paint via the head script below. */
@@ -347,9 +362,9 @@ func main() {
 		fmt.Fprintf(out, "Behavior:\n")
 		fmt.Fprintf(out, "  • .md / .markdown render as GitHub-styled HTML (GFM, syntax-highlighted code blocks).\n")
 		fmt.Fprintf(out, "  • Directories: index.html wins; otherwise index.md / README.md is rendered\n")
-		fmt.Fprintf(out, "    under a 'Home / <file>' breadcrumb; otherwise an auto-generated listing.\n")
+		fmt.Fprintf(out, "    with a collapsible file list on top; otherwise an auto-generated listing.\n")
 		fmt.Fprintf(out, "    Append ?listing=1 to any directory URL to force the bare file listing\n")
-		fmt.Fprintf(out, "    (this is what the 'Home' breadcrumb links to; it also bypasses index.html).\n")
+		fmt.Fprintf(out, "    (bypasses both the combined README page and index.html).\n")
 		fmt.Fprintf(out, "  • Everything else is served byte-for-byte (.js, .css, .wasm, .json, images,\n")
 		fmt.Fprintf(out, "    fonts, ...) so ES module scripts and static apps Just Work.\n")
 		fmt.Fprintf(out, "  • Append ?pretty=1 to a source-file URL for a syntax-highlighted view with\n")
@@ -526,10 +541,9 @@ func (h *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 //     below.
 //  3. Else, serve the auto-generated directory listing.
 //
-// The ?listing=1 escape hatch forces rule 3 unconditionally: it's what the
-// "Home" breadcrumb on a combined page links to, so the reader can always get
-// back to the bare file listing — even in a directory whose index.html would
-// otherwise pass through and hide it entirely.
+// The ?listing=1 escape hatch forces rule 3 unconditionally, so the reader can
+// always get back to the bare file listing — even in a directory whose
+// index.html would otherwise pass through and hide it entirely.
 func (h *fileHandler) serveDir(w http.ResponseWriter, r *http.Request, fsPath, urlPath string) {
 	if b, err := strconv.ParseBool(r.URL.Query().Get("listing")); err == nil && b {
 		h.serveDirIndex(w, r, fsPath, urlPath)
@@ -676,11 +690,13 @@ func (h *fileHandler) tryChromaHighlight(w http.ResponseWriter, r *http.Request,
 // markdown-body fragment with Name / Size / Modified columns. Includes a
 // parent "../" link when urlPath is not the root. Dotfiles are included
 // unless -hide-dotfiles is set. Directories are sorted before files; within
-// each group, alphabetically.
-func (h *fileHandler) listingHTML(fsPath, urlPath string) (template.HTML, error) {
+// each group, alphabetically. It also returns the count of visible files and
+// folders (the "../" parent row is navigation, not content, so it's excluded)
+// for callers that summarize the listing.
+func (h *fileHandler) listingHTML(fsPath, urlPath string) (_ template.HTML, files, folders int, _ error) {
 	entries, err := os.ReadDir(fsPath)
 	if err != nil {
-		return "", err
+		return "", 0, 0, err
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		ai, aj := entries[i].IsDir(), entries[j].IsDir()
@@ -701,6 +717,11 @@ func (h *fileHandler) listingHTML(fsPath, urlPath string) (template.HTML, error)
 		name := e.Name()
 		if h.hideDotfiles && strings.HasPrefix(name, ".") {
 			continue
+		}
+		if e.IsDir() {
+			folders++
+		} else {
+			files++
 		}
 		display := name
 		link := name
@@ -730,7 +751,29 @@ func (h *fileHandler) listingHTML(fsPath, urlPath string) (template.HTML, error)
 		)
 	}
 	b.WriteString("</tbody></table>\n")
-	return template.HTML(b.String()), nil
+	return template.HTML(b.String()), files, folders, nil
+}
+
+// dirCountSummary renders the "5 files · 3 folders" portion of the file
+// toggle's summary from the counts listingHTML returns. Zero-count groups are
+// dropped; an empty directory reads "empty".
+func dirCountSummary(files, folders int) string {
+	plural := func(n int, unit string) string {
+		if n == 1 {
+			return "1 " + unit
+		}
+		return fmt.Sprintf("%d %ss", n, unit)
+	}
+	switch {
+	case files == 0 && folders == 0:
+		return "empty"
+	case folders == 0:
+		return plural(files, "file")
+	case files == 0:
+		return plural(folders, "folder")
+	default:
+		return plural(files, "file") + " · " + plural(folders, "folder")
+	}
 }
 
 // humanSize formats a byte count using binary (KiB/MiB/...) units, with
@@ -749,7 +792,7 @@ func humanSize(n int64) string {
 }
 
 func (h *fileHandler) serveDirIndex(w http.ResponseWriter, r *http.Request, fsPath, urlPath string) {
-	listing, err := h.listingHTML(fsPath, urlPath)
+	listing, _, _, err := h.listingHTML(fsPath, urlPath)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -761,10 +804,13 @@ func (h *fileHandler) serveDirIndex(w http.ResponseWriter, r *http.Request, fsPa
 	_ = pageTpl.Execute(w, data)
 }
 
-// serveCombinedDir renders a directory as a single page: a breadcrumb across
-// the top, then the rendered README below, styled after github.com's repo-home
-// layout. The full file listing isn't shown inline — the "Home" crumb links to
-// it (?listing=1) so the README leads and the listing is one click away.
+// serveCombinedDir renders a directory as a single page: a collapsible file
+// list across the top, then the rendered README below, styled after
+// github.com's repo-home layout. The top strip is a <details> disclosure whose
+// summary reads "☰ 5 files · 3 folders in doc/api … README.md" — deliberately
+// NOT breadcrumb grammar. It's a control, not a path: expanding it reveals the
+// full listing inline (no navigation away), the count tells you what's here,
+// and the filename on the right labels what's rendered below.
 func (h *fileHandler) serveCombinedDir(w http.ResponseWriter, r *http.Request, fsPath, urlPath, readmePath string) {
 	src, err := os.ReadFile(readmePath)
 	if err != nil {
@@ -776,14 +822,25 @@ func (h *fileHandler) serveCombinedDir(w http.ResponseWriter, r *http.Request, f
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// Breadcrumb: "Home / README.md", then the rendered README. "Home" points
-	// at ?listing=1 (the bare file listing for this directory); the filename
-	// crumb links to the README on its own page.
+	listing, files, folders, err := h.listingHTML(fsPath, urlPath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Summary: "☰ <counts> in <dir> … <filename>". The counts are a plain
+	// label; the dir is the current path (omitted at the root, where there's
+	// no meaningful name); the filename on the right says which file is shown.
 	readmeName := filepath.Base(readmePath)
+	inClause := ""
+	if dir := strings.Trim(urlPath, "/"); dir != "" {
+		inClause = fmt.Sprintf(` in <span class="md-serve-files-dir">%s</span>`, html.EscapeString(dir))
+	}
 	body := fmt.Sprintf(
-		`<p class="md-serve-breadcrumb"><a href="?listing=1">Home</a> <span class="md-serve-breadcrumb-sep">/</span> <a href="%s">%s</a></p>%s`,
+		`<details class="md-serve-files"><summary><span class="md-serve-files-tri">▸</span><span class="md-serve-files-glyph">☰</span><span class="md-serve-files-meta">%s%s</span><span class="md-serve-files-name">%s</span></summary>%s</details>%s`,
+		dirCountSummary(files, folders),
+		inClause,
 		html.EscapeString(readmeName),
-		html.EscapeString(readmeName),
+		listing,
 		readme.String(),
 	)
 	data := h.newPageData(r, readmeName+" — "+urlPath, template.HTML(body))

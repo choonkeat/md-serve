@@ -316,35 +316,57 @@ func TestChromaRawDoesNotForceNosniff(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
-// Combined directory pages: a "Home / README.md" breadcrumb over the rendered
-// README, with the bare file listing one click away at ?listing=1.
+// Combined directory pages: a collapsible file list over the rendered README,
+// with the bare file listing also reachable at ?listing=1.
 // ----------------------------------------------------------------------------
 
-// A directory with a markdown index renders the README under a breadcrumb —
-// not the old inline listing table — and the "Home" crumb points at ?listing=1.
-func TestCombinedDirShowsBreadcrumbNotListing(t *testing.T) {
+// A directory with a markdown index renders the README under a collapsible
+// <details> file list whose summary counts the visible files/folders and names
+// the rendered file; the listing table is embedded inline (revealed on expand).
+func TestCombinedDirShowsCollapsibleFileList(t *testing.T) {
 	h := newTestHandler(t, map[string]string{
-		"README.md": "# Project\n\nrendered readme body.\n",
-		"other.txt": "hello\n",
+		"README.md":   "# Project\n\nrendered readme body.\n",
+		"other.txt":   "hello\n",
+		"sub/keep.md": "# Sub\n",
 	})
 	body := roundTrip(t, h, "/", "text/html").Body.String()
 
 	for _, want := range []string{
-		`<p class="md-serve-breadcrumb">`,
-		`href="?listing=1"`,
-		"Home",
-		"README.md",
-		"rendered readme body.", // the README is rendered inline
+		`<details class="md-serve-files">`,
+		"2 files · 1 folder",               // README.md + other.txt; sub/
+		"README.md",                        // filename label on the right
+		`<table class="md-serve-listing">`, // listing embedded inline
+		"other.txt",                        // ...and it lists the siblings
+		"rendered readme body.",            // the README is rendered inline
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("combined page missing %q\n%s", want, truncate(body, 500))
 		}
 	}
-	// The full listing table no longer appears on the combined page. (Match the
-	// actual table element, not the class name, which the stylesheet defines.)
-	for _, notWant := range []string{`<table class="md-serve-listing">`, "Files in", "other.txt"} {
-		if strings.Contains(body, notWant) {
-			t.Errorf("combined page should not contain %q\n%s", notWant, truncate(body, 500))
+	// At the root there's no directory name, so the summary omits the "in …"
+	// clause rather than showing "in /". (Match the clause markup, not the bare
+	// class name, which the stylesheet defines.)
+	if strings.Contains(body, `in <span class="md-serve-files-dir">`) {
+		t.Errorf("combined page at root should omit the dir clause\n%s", truncate(body, 500))
+	}
+}
+
+// At a nested directory the summary names the current directory in an "in …"
+// clause built from the URL path.
+func TestCombinedDirSummaryNamesNestedDir(t *testing.T) {
+	h := newTestHandler(t, map[string]string{
+		"doc/api/README.md": "# API\n\napi body.\n",
+		"doc/api/schema.md": "# Schema\n",
+	})
+	body := roundTrip(t, h, "/doc/api/", "text/html").Body.String()
+
+	for _, want := range []string{
+		`<details class="md-serve-files">`,
+		"2 files",
+		`in <span class="md-serve-files-dir">doc/api</span>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("nested combined page missing %q\n%s", want, truncate(body, 500))
 		}
 	}
 }
@@ -371,7 +393,7 @@ func TestListingQueryForcesFileListing(t *testing.T) {
 			t.Errorf("?listing=1 missing %q\n%s", want, truncate(listing, 500))
 		}
 	}
-	for _, notWant := range []string{"Static home", "rendered readme body.", `<p class="md-serve-breadcrumb">`} {
+	for _, notWant := range []string{"Static home", "rendered readme body.", `<details class="md-serve-files">`} {
 		if strings.Contains(listing, notWant) {
 			t.Errorf("?listing=1 should not contain %q\n%s", notWant, truncate(listing, 500))
 		}
