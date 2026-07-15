@@ -804,6 +804,23 @@ func (h *fileHandler) serveDirIndex(w http.ResponseWriter, r *http.Request, fsPa
 	_ = pageTpl.Execute(w, data)
 }
 
+// filesTogglePersistScript persists the collapsible file list's open/closed
+// state in localStorage (global key, matching the page-width widget). Placed
+// immediately after the </details>, it runs during parse and sets `open`
+// before paint, so a last-opened list shows expanded with no flash. Never
+// chosen before → the server-rendered default (closed) stands.
+const filesTogglePersistScript = `<script>
+(function(){
+  var d = document.currentScript.previousElementSibling;
+  if (!d || d.tagName !== 'DETAILS') return;
+  var KEY = 'md-serve-files-open';
+  try { if (localStorage.getItem(KEY) === '1') d.open = true; } catch(e) {}
+  d.addEventListener('toggle', function(){
+    try { localStorage.setItem(KEY, d.open ? '1' : '0'); } catch(e) {}
+  });
+})();
+</script>`
+
 // serveCombinedDir renders a directory as a single page: a collapsible file
 // list across the top, then the rendered README below, styled after
 // github.com's repo-home layout. The top strip is a <details> disclosure whose
@@ -836,11 +853,12 @@ func (h *fileHandler) serveCombinedDir(w http.ResponseWriter, r *http.Request, f
 		inClause = fmt.Sprintf(` in <span class="md-serve-files-dir">%s</span>`, html.EscapeString(dir))
 	}
 	body := fmt.Sprintf(
-		`<details class="md-serve-files"><summary><span class="md-serve-files-tri">▸</span><span class="md-serve-files-glyph">☰</span><span class="md-serve-files-meta">%s%s</span><span class="md-serve-files-name">%s</span></summary>%s</details>%s`,
+		`<details class="md-serve-files"><summary><span class="md-serve-files-tri">▸</span><span class="md-serve-files-glyph">☰</span><span class="md-serve-files-meta">%s%s</span><span class="md-serve-files-name">%s</span></summary>%s</details>%s%s`,
 		dirCountSummary(files, folders),
 		inClause,
 		html.EscapeString(readmeName),
 		listing,
+		filesTogglePersistScript,
 		readme.String(),
 	)
 	data := h.newPageData(r, readmeName+" — "+urlPath, template.HTML(body))

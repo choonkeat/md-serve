@@ -351,6 +351,38 @@ func TestCombinedDirShowsCollapsibleFileList(t *testing.T) {
 	}
 }
 
+// The combined dir page ships an inline script that persists the file list's
+// open/closed state in localStorage. It must sit immediately after the
+// </details> (so document.currentScript.previousElementSibling is the details)
+// and read/write the global key, defaulting to the server-rendered closed
+// state when nothing is stored.
+func TestCombinedDirPersistsFileListToggle(t *testing.T) {
+	h := newTestHandler(t, map[string]string{
+		"README.md": "# Project\n\nbody.\n",
+		"other.txt": "hello\n",
+	})
+	body := roundTrip(t, h, "/", "text/html").Body.String()
+
+	for _, want := range []string{
+		"md-serve-files-open",                          // the global localStorage key
+		"document.currentScript.previousElementSibling", // targets the details before it
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("combined page missing toggle-persist %q\n%s", want, truncate(body, 500))
+		}
+	}
+	// The details is still rendered closed by default (no `open` attribute); the
+	// stored preference is applied client-side.
+	if strings.Contains(body, `<details class="md-serve-files" open`) {
+		t.Errorf("combined page should render the file list closed by default\n%s", truncate(body, 500))
+	}
+	// The script must come after the </details> for previousElementSibling to
+	// resolve to it.
+	if di, si := strings.Index(body, "</details>"), strings.Index(body, "document.currentScript.previousElementSibling"); di < 0 || si < di {
+		t.Errorf("persist script must follow </details> (details=%d, script=%d)", di, si)
+	}
+}
+
 // At a nested directory the summary names the current directory in an "in …"
 // clause built from the URL path.
 func TestCombinedDirSummaryNamesNestedDir(t *testing.T) {
