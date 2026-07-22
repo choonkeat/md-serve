@@ -825,3 +825,30 @@ func decodeSearch(t *testing.T, h *fileHandler, query string, out *searchRespons
 		t.Fatalf("search %q: decode: %v", query, err)
 	}
 }
+
+// shouldPrettyLink memoizes by extension (or by basename when there is none),
+// because chroma's lexer lookup costs milliseconds and both the listing and
+// the file finder call it once per row. The cache must not blur distinct
+// answers together.
+func TestShouldPrettyLinkCaching(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"main.go", true},
+		{"main.go", true},     // second call comes from the cache
+		{"other.go", true},    // same extension, same answer
+		{"README.md", false},  // markdown has its own render path
+		{"index.html", false}, // served raw as the static payload
+		{"Makefile", true},    // extensionless, matched by name
+		{"Dockerfile", true},  // extensionless, different name
+		{"Makefile", true},    // cached by basename, not by "no extension"
+		{"LICENSE", false},    // extensionless with no lexer
+		{"archive.unknownext", false},
+	}
+	for _, c := range cases {
+		if got := shouldPrettyLink(c.name); got != c.want {
+			t.Errorf("shouldPrettyLink(%q) = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
