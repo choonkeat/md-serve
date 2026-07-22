@@ -123,7 +123,8 @@ md-serve -version
 ## Develop
 
 ```sh
-make build              # cross-compile all 6 platform binaries → npm-platforms/
+make build              # cross-compile all 6 platform binaries → npm-platforms/, then link
+make link               # just the link step: put this checkout's md-serve on PATH
 make test               # go vet
 make publish-dry        # rehearse the npm publish
 make publish            # ship to npm
@@ -134,6 +135,14 @@ The npm package layout: a thin shim (`bin/md-serve.js`) selects the
 right `@choonkeat/md-serve-<platform>-<arch>` optionalDependency at
 runtime, falling back to a locally built binary in `npm-platforms/`
 during development.
+
+That fallback is what makes `make build` enough to run your own changes:
+`npm link` symlinks the shim onto your PATH, and the shim prefers
+`npm-platforms/` over the published package, so `md-serve` means "this
+working tree". `make build` prints the resolved path and version banner
+so you can see which build you're about to run. One thing it can't
+reach: `npx @choonkeat/md-serve` resolves from the npx cache and keeps
+running the last *published* release regardless.
 
 ## License
 
