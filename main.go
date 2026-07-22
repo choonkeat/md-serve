@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/alecthomas/chroma/v2"
 	chromahtml "github.com/alecthomas/chroma/v2/formatters/html"
@@ -169,6 +170,7 @@ const chromeDarkRules = `
     .md-serve-pal-empty { color: #8b949e; }
     .md-serve-pal-foot { background: #161b22; border-top-color: #30363d; color: #8b949e; }
     .md-serve-pal-cancel { background: #161b22; border-color: #30363d; color: #58a6ff; }
+    .md-serve-pal-busy::before { background: #58a6ff; }
 `
 
 var (
@@ -293,6 +295,21 @@ var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
     border-bottom: 1px solid #d0d7de; color: #57606a; }
   .md-serve-pal-in input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent;
     color: #24292f; font: 16px/1.4 inherit; }
+  /* Indeterminate progress line under the input. The walk is usually a few
+     milliseconds, so it only appears after a short delay — long enough that a
+     local tree never flashes it, soon enough that a slow / deep / networked
+     tree doesn't look frozen. Results from the previous query stay on screen
+     underneath rather than blanking out. */
+  .md-serve-pal-busy { height: 2px; overflow: hidden; background: transparent; }
+  .md-serve-pal-busy::before { content: ""; display: block; height: 100%; width: 40%;
+    background: #0969da; animation: md-serve-pal-slide 1.1s ease-in-out infinite; }
+  @keyframes md-serve-pal-slide {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(350%); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .md-serve-pal-busy::before { width: 100%; animation: none; opacity: 0.4; }
+  }
   .md-serve-pal ul { list-style: none; margin: 0; padding: 0; max-height: 52vh; overflow-y: auto; }
   .md-serve-pal li[aria-selected=true] { background: #ddf4ff; }
   /* Whole row is an <a>: tap, long-press "open in new tab", and middle-click all
@@ -362,6 +379,7 @@ var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
     <input type="text" placeholder="Go to file&hellip;" aria-label="Go to file" aria-controls="md-serve-pal-list"
            autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-md-pal-q>
   </div>
+  <div class="md-serve-pal-busy" data-md-pal-busy role="status" aria-label="Searching" hidden></div>
   <ul id="md-serve-pal-list" role="listbox" data-md-pal-list></ul>
   <div class="md-serve-pal-empty" data-md-pal-empty hidden>No matching files</div>
   <div class="md-serve-pal-foot">
@@ -380,7 +398,8 @@ var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
   var list = document.querySelector('[data-md-pal-list]');
   var empty = document.querySelector('[data-md-pal-empty]');
   var more = document.querySelector('[data-md-pal-more]');
-  var items = [], sel = 0, timer = null, inflight = null, lastSent = null;
+  var pending = document.querySelector('[data-md-pal-busy]');
+  var items = [], sel = 0, timer = null, busyTimer = null, inflight = null, lastSent = null;
 
   function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
   /* Re-derive which characters matched so we can bold them. The server ranks;
@@ -419,16 +438,26 @@ var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
     empty.hidden = items.length > 0;
     more.textContent = res.has_more ? 'first ' + items.length : '';
   }
+  /* Only the newest request may clear the indicator: an aborted one settles
+     after its replacement started, and would otherwise report "done" while a
+     walk is still running. */
+  function busy(on) {
+    clearTimeout(busyTimer);
+    if (on) { busyTimer = setTimeout(function(){ pending.hidden = false; }, 150); }
+    else { pending.hidden = true; }
+  }
   function fetchNow() {
     var query = q.value;
     if (query === lastSent) return;
     lastSent = query;
     if (inflight) inflight.abort();
     inflight = new AbortController();
-    fetch('` + searchPath + `?q=' + encodeURIComponent(query), {signal: inflight.signal, cache: 'no-store'})
+    var mine = inflight;
+    busy(true);
+    fetch('` + searchPath + `?q=' + encodeURIComponent(query), {signal: mine.signal, cache: 'no-store'})
       .then(function(r){ return r.json(); })
-      .then(function(res){ render(res, query); })
-      .catch(function(){});
+      .then(function(res){ if (mine === inflight) { busy(false); render(res, query); } })
+      .catch(function(){ if (mine === inflight) busy(false); });
   }
   function schedule(){ clearTimeout(timer); timer = setTimeout(fetchNow, 100); }
   function move(d) {
@@ -446,6 +475,8 @@ var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
   function close() {
     pal.classList.remove('open'); back.classList.remove('open');
     pal.hidden = back.hidden = true;
+    clearTimeout(timer); busy(false);
+    if (inflight) { inflight.abort(); inflight = null; }
   }
   function isOpen(){ return pal.classList.contains('open'); }
 
@@ -1095,7 +1126,8 @@ func (h *fileHandler) search(w http.ResponseWriter, r *http.Request) {
 // palette opens on an alphabetical browse list rather than a blank panel.
 func (h *fileHandler) searchPaths(query string) ([]searchResult, bool) {
 	type scored struct {
-		res   searchResult
+		path  string
+		dir   bool
 		score int
 	}
 	var candidates []scored
@@ -1139,11 +1171,7 @@ walk:
 				rel += "/"
 			}
 			if s, ok := fuzzyScorePath(rel, query); ok {
-				candidates = append(candidates, scored{searchResult{
-					Path: rel,
-					Href: searchHref(rel, e.IsDir()),
-					Dir:  e.IsDir(),
-				}, s})
+				candidates = append(candidates, scored{rel, e.IsDir(), s})
 				if len(candidates) >= searchCandidateCap {
 					capped = true
 					break walk
@@ -1156,12 +1184,17 @@ walk:
 		if candidates[i].score != candidates[j].score {
 			return candidates[i].score < candidates[j].score
 		}
-		return candidates[i].res.Path < candidates[j].res.Path
+		return candidates[i].path < candidates[j].path
 	})
 	limit := min(len(candidates), searchResultLimit)
 	results := make([]searchResult, limit)
+	// Hrefs are built only for the results we return: searchHref consults
+	// chroma's lexer table, which costs milliseconds per call — paying it for
+	// every candidate made an empty query (which matches the whole tree) take
+	// a second on a 160-entry directory.
 	for i := range results {
-		results[i] = candidates[i].res
+		c := candidates[i]
+		results[i] = searchResult{Path: c.path, Href: searchHref(c.path, c.dir), Dir: c.dir}
 	}
 	return results, capped || len(candidates) > limit
 }
@@ -1360,12 +1393,29 @@ func (h *fileHandler) serveHighlighted(w http.ResponseWriter, r *http.Request, f
 // Markdown files have their own rendering path; .html/.htm are served
 // raw as the static-server's primary payload, so neither category gets
 // `?pretty=1` even if a lexer exists for them.
+// It's also memoized: lexers.Match costs milliseconds (chroma parses its
+// embedded lexer definitions on demand), and a listing or a file-finder
+// response calls it once per row. The answer depends only on the extension —
+// or, for extensionless files chroma matches by name (Makefile, Dockerfile),
+// on the lowercased basename — so that's the cache key.
+var prettyLinkCache sync.Map // string → bool
+
 func shouldPrettyLink(name string) bool {
-	switch strings.ToLower(filepath.Ext(name)) {
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
 	case ".md", ".markdown", ".html", ".htm":
 		return false
 	}
-	return lexers.Match(name) != nil
+	key := ext
+	if key == "" {
+		key = strings.ToLower(filepath.Base(name))
+	}
+	if v, ok := prettyLinkCache.Load(key); ok {
+		return v.(bool)
+	}
+	pretty := lexers.Match(name) != nil
+	prettyLinkCache.Store(key, pretty)
+	return pretty
 }
 
 // pickLexer chooses a chroma lexer for a file. Tries filename match
