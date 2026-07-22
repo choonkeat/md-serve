@@ -4,6 +4,37 @@ Tiny static file server that renders Markdown (`.md`, `.markdown`) as
 GitHub-styled HTML. Single Go binary, distributed via npm with native
 binaries for Linux / macOS / Windows on x64 and arm64.
 
+## Go to file
+
+Every page carries a top bar: the current path on the left (each ancestor
+segment is a link), a **🔍 Go to file** button on the right. It opens a
+fuzzy file finder over everything under the served directory, the way
+`t` does on GitHub and `⌘P` does in VS Code.
+
+- Open it with the button, or press `t`, `/`, `⌘K` / `Ctrl-K`, or
+  `⌘P` / `Ctrl-P`. Keys are ignored while you're typing in a field.
+- Type any subsequence of the path: `smg` finds `src/main.go`,
+  `pkgjson` finds `package.json`. A contiguous match ranks above a
+  scattered one, a tight match above a loose one, a short path above a
+  long one.
+- `↑` `↓` to move, `↵` to open, `⌘↵` / `Ctrl-↵` for a new tab, `esc` to
+  close. On touch, rows are full-width tap targets showing the filename
+  above its directory, with a **Cancel** button instead of `esc`.
+- Results link exactly where the directory listing would: `?pretty=1`
+  for source files, trailing `/` for directories.
+
+The tree is walked per keystroke (debounced) rather than indexed at
+startup, so a file you just created is findable immediately. The walk
+stops after 500 matches or 20,000 entries — a truncated list says
+`first 50` in its footer. `.git` is skipped; other dotfiles follow
+`-hide-dotfiles`.
+
+The endpoint behind it is plain JSON, if you want it directly:
+
+```sh
+curl 'http://localhost:8080/_md-serve-search?q=pkgjson'
+```
+
 ## Protip: query strings
 
 A few query strings change how a URL is served — handy when the default

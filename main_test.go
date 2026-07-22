@@ -1,8 +1,11 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -364,7 +367,7 @@ func TestCombinedDirPersistsFileListToggle(t *testing.T) {
 	body := roundTrip(t, h, "/", "text/html").Body.String()
 
 	for _, want := range []string{
-		"md-serve-files-open",                          // the global localStorage key
+		"md-serve-files-open",                           // the global localStorage key
 		"document.currentScript.previousElementSibling", // targets the details before it
 	} {
 		if !strings.Contains(body, want) {
@@ -629,4 +632,196 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// ----------------------------------------------------------------------------
+// file finder — fuzzy ranking, the search endpoint, and the top bar
+// ----------------------------------------------------------------------------
+
+func TestFuzzyScorePathMatching(t *testing.T) {
+	cases := []struct {
+		path, query string
+		want        bool
+	}{
+		{"src/main.go", "main", true}, // contiguous
+		{"src/main.go", "smg", true},  // scattered subsequence
+		{"src/main.go", "MAIN", true}, // case-insensitive
+		{"README.md", "xyz", false},   // no match
+		{"README.md", "dmer", false},  // right letters, wrong order
+		{"anything", "", true},        // empty query matches everything
+	}
+	for _, c := range cases {
+		if _, ok := fuzzyScorePath(c.path, c.query); ok != c.want {
+			t.Errorf("fuzzyScorePath(%q, %q) matched = %v, want %v", c.path, c.query, ok, c.want)
+		}
+	}
+}
+
+// Ranking contract: a contiguous substring outranks a scattered subsequence,
+// a tighter run outranks a sparse one, and a shorter path breaks the tie.
+func TestFuzzyScorePathRanking(t *testing.T) {
+	better := func(a, b, query string) {
+		t.Helper()
+		sa, oka := fuzzyScorePath(a, query)
+		sb, okb := fuzzyScorePath(b, query)
+		if !oka || !okb {
+			t.Fatalf("both should match %q: %q=%v %q=%v", query, a, oka, b, okb)
+		}
+		if sa >= sb {
+			t.Errorf("fuzzyScorePath(%q,%q)=%d should rank better (lower) than (%q,%q)=%d",
+				a, query, sa, b, query, sb)
+		}
+	}
+	better("tasks/readme.md", "cmd/templates/host/Dockerfile", "task") // substring beats scattered
+	better("aXbcd", "abXcd", "abcd")                                   // longer run beats sparse
+	better("main.go", "cmd/internal/main.go", "main")                  // shorter path breaks the tie
+}
+
+func TestSearchEndpointRanksAndLinks(t *testing.T) {
+	h := newTestHandler(t, map[string]string{
+		"package.json":                   "{}\n",
+		"npm-platforms/x64/package.json": "{}\n",
+		"docs/adr/0001-bootstrap.md":     "# adr\n",
+		"main.go":                        "package main\n",
+	})
+
+	var got searchResponse
+	decodeSearch(t, h, "pkgjson", &got)
+	if len(got.Results) != 2 {
+		t.Fatalf("q=pkgjson returned %d results, want 2: %+v", len(got.Results), got.Results)
+	}
+	// Shorter path wins the tie between two equally-scattered matches.
+	if got.Results[0].Path != "package.json" {
+		t.Errorf("top result = %q, want package.json", got.Results[0].Path)
+	}
+
+	// Links match what the directory listing would have produced: ?pretty=1 for
+	// source files we'd highlight, bare paths for markdown, trailing / for dirs.
+	decodeSearch(t, h, "main.go", &got)
+	if len(got.Results) == 0 || got.Results[0].Href != "/main.go?pretty=1" {
+		t.Errorf("main.go href = %+v, want /main.go?pretty=1", got.Results)
+	}
+	decodeSearch(t, h, "0001-bootstrap", &got)
+	if len(got.Results) == 0 || got.Results[0].Href != "/docs/adr/0001-bootstrap.md" {
+		t.Errorf("markdown href = %+v, want no ?pretty=1", got.Results)
+	}
+	decodeSearch(t, h, "docs/", &got)
+	if len(got.Results) == 0 || !got.Results[0].Dir || got.Results[0].Href != "/docs/" {
+		t.Errorf("dir result = %+v, want /docs/ flagged as a dir", got.Results)
+	}
+
+	// No match is an empty list, not a null — the client iterates it directly.
+	decodeSearch(t, h, "zzzzzz", &got)
+	if len(got.Results) != 0 || got.HasMore {
+		t.Errorf("q=zzzzzz = %+v, want no results and has_more=false", got)
+	}
+}
+
+// Dotfiles follow the same rule as listings: served (and findable) by default,
+// omitted entirely under -hide-dotfiles. .git is always skipped — it's noise
+// nobody navigates to by name and it would eat the walk's visit budget.
+func TestSearchHonorsDotfilePolicy(t *testing.T) {
+	files := map[string]string{
+		".env":        "SECRET=1\n",
+		".git/config": "[core]\n",
+		"visible.txt": "hi\n",
+	}
+	h := newTestHandler(t, files)
+
+	var got searchResponse
+	decodeSearch(t, h, "env", &got)
+	if len(got.Results) != 1 || got.Results[0].Path != ".env" {
+		t.Errorf("dotfiles should be findable by default, got %+v", got.Results)
+	}
+	decodeSearch(t, h, "config", &got)
+	if len(got.Results) != 0 {
+		t.Errorf(".git contents should never be walked, got %+v", got.Results)
+	}
+
+	h.hideDotfiles = true
+	decodeSearch(t, h, "env", &got)
+	if len(got.Results) != 0 {
+		t.Errorf("-hide-dotfiles should omit .env, got %+v", got.Results)
+	}
+	decodeSearch(t, h, "visible", &got)
+	if len(got.Results) != 1 {
+		t.Errorf("visible.txt should still be findable, got %+v", got.Results)
+	}
+}
+
+// Past the result limit the response says so, so the palette can tell the
+// reader they're looking at a truncated list rather than the whole tree.
+func TestSearchReportsHasMore(t *testing.T) {
+	files := map[string]string{}
+	for i := 0; i < 12; i++ {
+		files[fmt.Sprintf("f%02d.txt", i)] = "x\n"
+	}
+	h := newTestHandler(t, files)
+
+	defer func(n int) { searchResultLimit = n }(searchResultLimit)
+	searchResultLimit = 5
+
+	var got searchResponse
+	decodeSearch(t, h, "txt", &got)
+	if len(got.Results) != 5 || !got.HasMore {
+		t.Errorf("got %d results has_more=%v, want 5 and true", len(got.Results), got.HasMore)
+	}
+}
+
+// The top bar (and with it the finder) is chrome on every rendered page, not
+// just directory pages — that's the whole point of promoting it out of the
+// collapsible file list.
+func TestTopBarOnEveryRenderedPage(t *testing.T) {
+	h := newTestHandler(t, map[string]string{
+		"README.md":     "# root\n",
+		"docs/notes.md": "# notes\n",
+		"main.go":       "package main\n",
+		"sub/a.txt":     "a\n",
+	})
+	for _, target := range []string{"/", "/docs/notes.md", "/main.go?pretty=1", "/sub/"} {
+		body := roundTrip(t, h, target, "text/html").Body.String()
+		if !strings.Contains(body, `class="md-serve-bar"`) {
+			t.Errorf("GET %s is missing the top bar\n%s", target, truncate(body, 300))
+		}
+		if !strings.Contains(body, "data-md-find") {
+			t.Errorf("GET %s is missing the Go to file trigger", target)
+		}
+	}
+}
+
+// The crumb links every ancestor and leaves the current segment as plain text.
+func TestCrumbHTML(t *testing.T) {
+	if got := string(crumbHTML("/")); got != `<a href="/">/</a>` {
+		t.Errorf("root crumb = %q", got)
+	}
+	got := string(crumbHTML("/docs/adr/0001.md"))
+	for _, want := range []string{`<a href="/">/</a>`, `<a href="/docs/">docs</a>`, `<b>0001.md</b>`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("crumb %q missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, `<a href="/docs/adr/0001.md/">`) {
+		t.Errorf("crumb should not link the current page: %q", got)
+	}
+	// A segment with a space or a quote must not break out of its attribute or
+	// its text node: the space is percent-encoded in the href, the quote escaped.
+	raw := string(crumbHTML(`/a b/c"d`))
+	if !strings.Contains(raw, `href="/a%20b/"`) || strings.Contains(raw, `c"d`) {
+		t.Errorf("crumb should escape path segments: %q", raw)
+	}
+}
+
+// decodeSearch drives one query through the search handler and decodes it.
+func decodeSearch(t *testing.T, h *fileHandler, query string, out *searchResponse) {
+	t.Helper()
+	req := httptest.NewRequest("GET", searchPath+"?q="+url.QueryEscape(query), nil)
+	rec := httptest.NewRecorder()
+	h.search(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("search %q status = %d, want 200", query, rec.Code)
+	}
+	*out = searchResponse{}
+	if err := json.NewDecoder(rec.Body).Decode(out); err != nil {
+		t.Fatalf("search %q: decode: %v", query, err)
+	}
 }

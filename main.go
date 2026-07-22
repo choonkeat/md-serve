@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"embed"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -47,6 +49,9 @@ const assetsPrefix = "/_md-serve-assets/"
 
 // Endpoint used by injected live-reload JS to poll for source-file changes.
 const livereloadPath = "/_md-serve-livereload"
+
+// Endpoint backing the "Go to file" palette: fuzzy-matches paths under -dir.
+const searchPath = "/_md-serve-search"
 
 // maxHighlightBytes caps how big a source file we'll syntax-highlight.
 // Above this, we fall back to byte-for-byte serving via http.ServeFile so
@@ -148,6 +153,22 @@ const chromeDarkRules = `
     .md-serve-width-panel { background: #161b22; border-color: #30363d; color: #8b949e; }
     .md-serve-width-panel button { background: #21262d; border-color: #30363d; color: #c9d1d9; }
     .md-serve-width-panel button:hover { background: #30363d; }
+    .md-serve-bar { background: #0d1117; border-bottom-color: #30363d; }
+    .md-serve-bar-crumb, .md-serve-bar-crumb a { color: #8b949e; }
+    .md-serve-bar-crumb b { color: #c9d1d9; }
+    .md-serve-find { background: #161b22; border-color: #30363d; color: #8b949e; }
+    .md-serve-find:hover { border-color: #58a6ff; }
+    .md-serve-find kbd, .md-serve-pal-foot kbd { background: #0d1117; border-color: #30363d; }
+    .md-serve-pal { background: #0d1117; border-color: #30363d; box-shadow: 0 16px 48px rgba(1,4,9,0.85); }
+    .md-serve-pal-in { border-bottom-color: #30363d; color: #8b949e; }
+    .md-serve-pal-in input { color: #c9d1d9; }
+    .md-serve-pal li[aria-selected=true], .md-serve-pal li > a:active { background: #1f2b3a; }
+    .md-serve-pal li > a { color: #c9d1d9; }
+    .md-serve-pal .md-serve-pal-icon, .md-serve-pal .md-serve-pal-dir { color: #8b949e; }
+    .md-serve-pal mark { color: #58a6ff; }
+    .md-serve-pal-empty { color: #8b949e; }
+    .md-serve-pal-foot { background: #161b22; border-top-color: #30363d; color: #8b949e; }
+    .md-serve-pal-cancel { background: #161b22; border-color: #30363d; color: #58a6ff; }
 `
 
 var (
@@ -239,6 +260,78 @@ var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
   .md-serve-width-panel button { flex: 1; background: #f6f8fa; border: 1px solid #d0d7de;
     border-radius: 4px; padding: 4px 8px; cursor: pointer; font: inherit; color: #24292f; }
   .md-serve-width-panel button:hover { background: #eef1f4; }
+  /* Top bar: the only chrome on every page. Left is the current path (linked
+     per segment), right is the file finder's affordance. Sticky, with negative
+     margins so it spans the body padding edge to edge. */
+  .md-serve-bar { position: sticky; top: 0; z-index: 40; display: flex; align-items: center;
+    gap: 12px; margin: -45px -45px 24px -45px; padding: 8px 45px;
+    background: #ffffff; border-bottom: 1px solid #d0d7de;
+    font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  @media (max-width: 767px) { .md-serve-bar { margin: -15px -15px 16px -15px; padding: 8px 15px; } }
+  .md-serve-bar-crumb { color: #57606a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .md-serve-bar-crumb a { color: #57606a; text-decoration: none; }
+  .md-serve-bar-crumb a:hover { text-decoration: underline; }
+  .md-serve-bar-crumb b { color: #24292f; font-weight: 600; }
+  .md-serve-bar-spacer { flex: 1; }
+  .md-serve-find { display: flex; align-items: center; gap: 8px; flex: none; cursor: pointer;
+    border: 1px solid #d0d7de; border-radius: 6px; background: #f6f8fa; color: #57606a;
+    padding: 4px 8px; font: inherit; font-size: 13px; min-width: 200px; }
+  .md-serve-find:hover { border-color: #0969da; }
+  .md-serve-find kbd { margin-left: auto; border: 1px solid #d0d7de; border-bottom-width: 2px;
+    border-radius: 4px; padding: 0 5px; background: #ffffff;
+    font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  /* Palette. Centered dialog on a mouse; a full-bleed sheet with 44px rows on
+     touch, where there is no t / esc key and no room to waste. */
+  .md-serve-pal-back { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,0.35); display: none; }
+  .md-serve-pal-back.open { display: block; }
+  .md-serve-pal { position: fixed; z-index: 101; left: 50%; top: 12vh; transform: translateX(-50%);
+    width: min(680px, 92vw); display: none; overflow: hidden; background: #ffffff;
+    border: 1px solid #d0d7de; border-radius: 10px; box-shadow: 0 16px 48px rgba(27,31,36,0.12);
+    font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  .md-serve-pal.open { display: block; }
+  .md-serve-pal-in { display: flex; align-items: center; gap: 10px; padding: 12px 14px;
+    border-bottom: 1px solid #d0d7de; color: #57606a; }
+  .md-serve-pal-in input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent;
+    color: #24292f; font: 16px/1.4 inherit; }
+  .md-serve-pal ul { list-style: none; margin: 0; padding: 0; max-height: 52vh; overflow-y: auto; }
+  .md-serve-pal li[aria-selected=true] { background: #ddf4ff; }
+  /* Whole row is an <a>: tap, long-press "open in new tab", and middle-click all
+     work natively, with no JS click handling to get wrong on touch. */
+  .md-serve-pal li > a { display: flex; align-items: center; gap: 10px; padding: 7px 14px;
+    color: #24292f; text-decoration: none; -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation; }
+  .md-serve-pal li > a:active { background: #ddf4ff; }
+  .md-serve-pal .md-serve-pal-icon { flex: none; width: 16px; text-align: center; color: #57606a; }
+  .md-serve-pal .md-serve-pal-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .md-serve-pal .md-serve-pal-dir { color: #57606a; }
+  .md-serve-pal mark { background: transparent; color: #0969da; font-weight: 700; }
+  .md-serve-pal-empty { padding: 24px 14px; text-align: center; color: #57606a; }
+  .md-serve-pal-foot { display: flex; align-items: center; gap: 14px; padding: 7px 14px;
+    border-top: 1px solid #d0d7de; background: #f6f8fa; color: #57606a; font-size: 12px; }
+  .md-serve-pal-foot kbd { border: 1px solid #d0d7de; border-bottom-width: 2px; border-radius: 4px;
+    padding: 0 5px; background: #ffffff; font: 11px/1.6 ui-monospace, Menlo, monospace; }
+  .md-serve-pal-more { margin-left: auto; }
+  .md-serve-pal-cancel { display: none; margin-left: auto; padding: 8px 16px; min-height: 40px;
+    border: 1px solid #d0d7de; border-radius: 6px; background: #ffffff; color: #0969da;
+    font: inherit; font-size: 14px; cursor: pointer; }
+  @media (pointer: coarse), (max-width: 700px) {
+    .md-serve-find kbd { display: none; }
+    .md-serve-find { min-width: 0; min-height: 36px; padding: 6px 12px; }
+    .md-serve-pal { top: 0; width: 100vw; max-height: 100vh; border: 0; border-radius: 0; }
+    .md-serve-pal ul { max-height: calc(100vh - 130px); }
+    .md-serve-pal li > a { padding: 12px 14px; min-height: 44px; }
+    .md-serve-pal-foot .md-serve-pal-hint { display: none; }
+    .md-serve-pal-cancel { display: block; }
+    /* Narrow screens truncate the right edge — which is the filename, the part
+       you actually read. Stack instead: filename on top, dimmed dir below. */
+    .md-serve-pal .md-serve-pal-path { display: flex; flex-direction: column;
+      align-items: flex-start; flex: 1; }
+    .md-serve-pal .md-serve-pal-path > span { max-width: 100%; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap; }
+    .md-serve-pal .md-serve-pal-name { order: 1; }
+    .md-serve-pal .md-serve-pal-dir { order: 2; font-size: 12px; }
+  }
+  @media (max-width: 420px) { .md-serve-find .md-serve-find-label { display: none; } }
   {{.ChromeDarkCSS}}
 </style>
 <script>
@@ -252,9 +345,146 @@ var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
 </script>
 </head>
 <body>
+<div class="md-serve-bar">
+  <span class="md-serve-bar-crumb">{{.Crumb}}</span>
+  <span class="md-serve-bar-spacer"></span>
+  <button type="button" class="md-serve-find" data-md-find aria-haspopup="dialog">
+    <span>&#128269;</span><span class="md-serve-find-label">Go to file</span><kbd>t</kbd>
+  </button>
+</div>
 <article class="markdown-body">
 {{.Body}}
 </article>
+<div class="md-serve-pal-back" data-md-pal-back hidden></div>
+<div class="md-serve-pal" role="dialog" aria-modal="true" aria-label="Go to file" data-md-pal hidden>
+  <div class="md-serve-pal-in">
+    <span>&#128269;</span>
+    <input type="text" placeholder="Go to file&hellip;" aria-label="Go to file" aria-controls="md-serve-pal-list"
+           autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-md-pal-q>
+  </div>
+  <ul id="md-serve-pal-list" role="listbox" data-md-pal-list></ul>
+  <div class="md-serve-pal-empty" data-md-pal-empty hidden>No matching files</div>
+  <div class="md-serve-pal-foot">
+    <span class="md-serve-pal-hint"><kbd>&uarr;</kbd><kbd>&darr;</kbd> navigate</span>
+    <span class="md-serve-pal-hint"><kbd>&crarr;</kbd> open</span>
+    <span class="md-serve-pal-hint"><kbd>esc</kbd> close</span>
+    <button type="button" class="md-serve-pal-cancel" data-md-pal-cancel>Cancel</button>
+    <span class="md-serve-pal-more" data-md-pal-more></span>
+  </div>
+</div>
+<script>
+(function(){
+  var pal = document.querySelector('[data-md-pal]');
+  var back = document.querySelector('[data-md-pal-back]');
+  var q = document.querySelector('[data-md-pal-q]');
+  var list = document.querySelector('[data-md-pal-list]');
+  var empty = document.querySelector('[data-md-pal-empty]');
+  var more = document.querySelector('[data-md-pal-more]');
+  var items = [], sel = 0, timer = null, inflight = null, lastSent = null;
+
+  function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
+  /* Re-derive which characters matched so we can bold them. The server ranks;
+     the client only needs the same subsequence walk to place the marks, and a
+     contiguous hit is highlighted as one block to match the server's tier 0.
+     Hits are computed once over the whole path and then sliced — marking the
+     directory and the filename separately would let each half claim its own
+     copy of the query and bold characters that never matched. */
+  function hits(text, query) {
+    var h = {};
+    if (!query) return h;
+    var lt = text.toLowerCase(), lq = query.toLowerCase(), at = lt.indexOf(lq);
+    if (at >= 0) { for (var k = 0; k < lq.length; k++) h[at+k] = 1; return h; }
+    for (var i = 0, j = 0; i < lt.length && j < lq.length; i++) if (lt[i] === lq[j]) { h[i] = 1; j++; }
+    return h;
+  }
+  function marked(text, h, offset) {
+    var out = '';
+    for (var c = 0; c < text.length; c++) out += h[c+offset] ? '<mark>' + esc(text[c]) + '</mark>' : esc(text[c]);
+    return out;
+  }
+  function render(res, query) {
+    items = res.results;
+    sel = 0;
+    list.innerHTML = items.map(function(it, i){
+      var cut = it.path.replace(/\/$/, '').lastIndexOf('/') + 1;
+      var h = hits(it.path, query);
+      var dir = marked(it.path.slice(0, cut), h, 0);
+      var name = marked(it.path.slice(cut), h, cut);
+      return '<li role="option" aria-selected="' + (i === 0) + '">' +
+        '<a href="' + esc(it.href) + '">' +
+        '<span class="md-serve-pal-icon">' + (it.dir ? '&#128193;' : '&#128196;') + '</span>' +
+        '<span class="md-serve-pal-path"><span class="md-serve-pal-dir">' + dir + '</span>' +
+        '<span class="md-serve-pal-name">' + name + '</span></span></a></li>';
+    }).join('');
+    empty.hidden = items.length > 0;
+    more.textContent = res.has_more ? 'first ' + items.length : '';
+  }
+  function fetchNow() {
+    var query = q.value;
+    if (query === lastSent) return;
+    lastSent = query;
+    if (inflight) inflight.abort();
+    inflight = new AbortController();
+    fetch('` + searchPath + `?q=' + encodeURIComponent(query), {signal: inflight.signal, cache: 'no-store'})
+      .then(function(r){ return r.json(); })
+      .then(function(res){ render(res, query); })
+      .catch(function(){});
+  }
+  function schedule(){ clearTimeout(timer); timer = setTimeout(fetchNow, 100); }
+  function move(d) {
+    if (!items.length) return;
+    list.children[sel].setAttribute('aria-selected', 'false');
+    sel = (sel + d + items.length) % items.length;
+    list.children[sel].setAttribute('aria-selected', 'true');
+    list.children[sel].scrollIntoView({block: 'nearest'});
+  }
+  function open() {
+    pal.hidden = back.hidden = false;
+    pal.classList.add('open'); back.classList.add('open');
+    q.value = ''; lastSent = null; fetchNow(); q.focus();
+  }
+  function close() {
+    pal.classList.remove('open'); back.classList.remove('open');
+    pal.hidden = back.hidden = true;
+  }
+  function isOpen(){ return pal.classList.contains('open'); }
+
+  document.querySelector('[data-md-find]').addEventListener('click', open);
+  document.querySelector('[data-md-pal-cancel]').addEventListener('click', close);
+  back.addEventListener('click', close);
+  q.addEventListener('input', schedule);
+  /* Mouse-only: on touch the row under the thumb would steal the highlight
+     mid-scroll, so selection follows the pointer but never a finger. */
+  list.addEventListener('mousemove', function(e){
+    var li = e.target.closest('li'); if (!li) return;
+    var i = Array.prototype.indexOf.call(list.children, li);
+    if (i < 0 || i === sel) return;
+    list.children[sel].setAttribute('aria-selected', 'false');
+    sel = i; li.setAttribute('aria-selected', 'true');
+  });
+  document.addEventListener('keydown', function(e){
+    if (!isOpen()) {
+      var t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if (e.altKey || e.ctrlKey || e.metaKey) {
+        if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'p')) { e.preventDefault(); open(); }
+        return;
+      }
+      if (e.key === 't' || e.key === '/') { e.preventDefault(); open(); }
+      return;
+    }
+    if (e.key === 'Escape') { close(); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); move(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); move(-1); }
+    else if (e.key === 'Enter' && items[sel]) {
+      e.preventDefault();
+      var href = items[sel].href;
+      if (e.metaKey || e.ctrlKey) window.open(href, '_blank');
+      else window.location.href = href;
+    }
+  });
+})();
+</script>
 <details class="md-serve-width-ctrl" aria-label="Page width">
   <summary title="Page width">&#8596;</summary>
   <div class="md-serve-width-panel">
@@ -332,6 +562,7 @@ var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
 type pageData struct {
 	Title         string
 	Body          template.HTML
+	Crumb         template.HTML
 	AssetsPrefix  string
 	MarkdownCSS   string
 	ChromaCSS     template.CSS
@@ -378,6 +609,10 @@ func main() {
 		fmt.Fprintf(out, "  • Theme follows the browser's prefers-color-scheme (github light/dark).\n")
 		fmt.Fprintf(out, "    Pass -theme-cookie NAME to instead pin the theme from a request cookie\n")
 		fmt.Fprintf(out, "    (value light/dark), e.g. -theme-cookie swe-swe-theme to match a host UI.\n")
+		fmt.Fprintf(out, "  • Every page has a top bar with the current path and a \"Go to file\"\n")
+		fmt.Fprintf(out, "    fuzzy finder (hotkeys: t, /, ⌘K/Ctrl-K, ⌘P/Ctrl-P). It walks the\n")
+		fmt.Fprintf(out, "    served tree per query — GET %s?q=… returns the\n", searchPath)
+		fmt.Fprintf(out, "    same results as JSON.\n")
 		fmt.Fprintf(out, "  • Live-reload polls every second; pass -no-live to disable.\n")
 		fmt.Fprintf(out, "  • Dotfiles are served and listed by default; pass -hide-dotfiles to\n")
 		fmt.Fprintf(out, "    omit them from listings and 404 direct requests. Path traversal\n")
@@ -419,6 +654,7 @@ func main() {
 	if live {
 		mux.HandleFunc(livereloadPath, h.livereload)
 	}
+	mux.HandleFunc(searchPath, h.search)
 	mux.Handle("/", h)
 
 	srv := &http.Server{Addr: *addr, Handler: logMiddleware(mux)}
@@ -472,6 +708,7 @@ func (h *fileHandler) newPageData(r *http.Request, title string, body template.H
 	return pageData{
 		Title:         title,
 		Body:          body,
+		Crumb:         crumbHTML(path.Clean("/" + r.URL.Path)),
 		AssetsPrefix:  assetsPrefix,
 		MarkdownCSS:   ta.MarkdownCSS,
 		ChromaCSS:     ta.ChromaCSS,
@@ -479,6 +716,29 @@ func (h *fileHandler) newPageData(r *http.Request, title string, body template.H
 		ColorScheme:   ta.ColorScheme,
 		LiveReload:    h.live,
 	}
+}
+
+// crumbHTML renders the top bar's path: every ancestor segment is a link back
+// up the tree, the last one is plain bold text (you're already there). The root
+// is a "/" link, so even the top page has something to show.
+func crumbHTML(urlPath string) template.HTML {
+	segs := strings.FieldsFunc(urlPath, func(r rune) bool { return r == '/' })
+	var b strings.Builder
+	b.WriteString(`<a href="/">/</a>`)
+	href := "/"
+	for i, seg := range segs {
+		href += seg + "/"
+		if i > 0 {
+			b.WriteString("/")
+		}
+		if i == len(segs)-1 {
+			fmt.Fprintf(&b, `<b>%s</b>`, html.EscapeString(seg))
+			continue
+		}
+		fmt.Fprintf(&b, `<a href="%s">%s</a>`,
+			html.EscapeString((&url.URL{Path: href}).String()), html.EscapeString(seg))
+	}
+	return template.HTML(b.String())
 }
 
 // hasHiddenSegment reports whether any component of the cleaned URL path is a
@@ -789,6 +1049,199 @@ func humanSize(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// Tunables for the file-finder walk. Vars (not consts) so tests can lower the
+// cap to force breadth-first ordering without building a huge tree.
+var (
+	// searchCandidateCap bounds how many fuzzy matches we collect before
+	// stopping the walk (trips HasMore).
+	searchCandidateCap = 500
+	// searchResultLimit is how many top-ranked matches we return.
+	searchResultLimit = 50
+	// searchVisitCap is a safety backstop on directory entries inspected, so a
+	// pathological tree can't hang a request (trips HasMore).
+	searchVisitCap = 20000
+)
+
+type searchResult struct {
+	Path string `json:"path"` // root-relative, e.g. "docs/adr/0001-x.md"
+	Href string `json:"href"` // ready-to-use link, escaped, with ?pretty=1 where it helps
+	Dir  bool   `json:"dir"`
+}
+
+type searchResponse struct {
+	Results []searchResult `json:"results"`
+	HasMore bool           `json:"has_more"`
+}
+
+// search backs the "Go to file" palette: GET /_md-serve-search?q=… returns
+// paths under -dir that fuzzy-match q, best first. The tree is walked per
+// request rather than indexed at startup — same reasoning as live-reload, a
+// served directory changes under us and a stale index is worse than a 15ms
+// walk. The caps above keep a huge tree from turning into a slow request.
+func (h *fileHandler) search(w http.ResponseWriter, r *http.Request) {
+	results, hasMore := h.searchPaths(r.URL.Query().Get("q"))
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(searchResponse{Results: results, HasMore: hasMore})
+}
+
+// searchPaths walks h.root breadth-first, collecting entries whose relative
+// path fuzzy-matches query, then ranks them by fuzzyScorePath (lower = better).
+// BFS decides which candidates survive the candidate cap (shallowest first),
+// which is what makes a capped walk of a deep tree still feel top-down; the
+// final display order is by score. An empty query matches everything, so the
+// palette opens on an alphabetical browse list rather than a blank panel.
+func (h *fileHandler) searchPaths(query string) ([]searchResult, bool) {
+	type scored struct {
+		res   searchResult
+		score int
+	}
+	var candidates []scored
+	capped := false
+
+	queue := []string{h.root}
+	visited := 0
+walk:
+	for len(queue) > 0 {
+		dir := queue[0]
+		queue = queue[1:]
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+		for _, e := range entries {
+			if h.hideDotfiles && strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
+			// .git is skipped even when dotfiles are served: it's thousands of
+			// object files nobody navigates to by name, and walking it would
+			// spend the visit cap before reaching the rest of the tree. It
+			// stays reachable through directory listings and direct URLs.
+			if e.IsDir() && e.Name() == ".git" {
+				continue
+			}
+			visited++
+			if visited >= searchVisitCap {
+				capped = true
+				break walk
+			}
+			fsPath := filepath.Join(dir, e.Name())
+			rel, err := filepath.Rel(h.root, fsPath)
+			if err != nil {
+				continue
+			}
+			rel = filepath.ToSlash(rel)
+			if e.IsDir() {
+				queue = append(queue, fsPath)
+				rel += "/"
+			}
+			if s, ok := fuzzyScorePath(rel, query); ok {
+				candidates = append(candidates, scored{searchResult{
+					Path: rel,
+					Href: searchHref(rel, e.IsDir()),
+					Dir:  e.IsDir(),
+				}, s})
+				if len(candidates) >= searchCandidateCap {
+					capped = true
+					break walk
+				}
+			}
+		}
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].score != candidates[j].score {
+			return candidates[i].score < candidates[j].score
+		}
+		return candidates[i].res.Path < candidates[j].res.Path
+	})
+	limit := min(len(candidates), searchResultLimit)
+	results := make([]searchResult, limit)
+	for i := range results {
+		results[i] = candidates[i].res
+	}
+	return results, capped || len(candidates) > limit
+}
+
+// searchHref turns a root-relative path into the link the palette navigates to,
+// matching what the directory listing would have linked: directories keep their
+// trailing slash, source files we'd highlight get ?pretty=1, everything else is
+// served byte-for-byte. Each segment is escaped, so spaces and #? in filenames
+// survive the round trip.
+func searchHref(rel string, isDir bool) string {
+	u := url.URL{Path: "/" + strings.TrimSuffix(rel, "/")}
+	if isDir {
+		u.Path += "/"
+	} else if shouldPrettyLink(path.Base(rel)) {
+		u.RawQuery = "pretty=1"
+	}
+	return u.String()
+}
+
+// fuzzyScorePath checks if all query characters appear in s in order
+// (case-insensitive) and returns a composite score indicating match quality.
+// Lower scores are better matches. Ported from agent-chat's `/` file
+// completer so both tools rank the same way.
+//
+// Tiers (lower = better) are encoded into the high bits of the score so a
+// single int comparison ranks by tier first, then within-tier by
+// (longestRun desc, span asc, length asc):
+//
+//	tier 0 = path contains query as a contiguous substring
+//	tier 1 = path fuzzy-matches (subsequence) only
+//
+// Within a tier, longestRun (longest block of query chars landing on
+// consecutive positions in the path) wins, then a tighter span, then a
+// shorter overall path. This is the conventional fzf-style heuristic.
+func fuzzyScorePath(s, query string) (int, bool) {
+	if query == "" {
+		return 0, true
+	}
+	ls := strings.ToLower(s)
+	lq := strings.ToLower(query)
+	qi, first, last := 0, -1, -1
+	longest, current, lastMatch := 0, 0, -2
+	for i := 0; i < len(ls) && qi < len(lq); i++ {
+		if ls[i] == lq[qi] {
+			if first < 0 {
+				first = i
+			}
+			last = i
+			if i == lastMatch+1 {
+				current++
+			} else {
+				current = 1
+			}
+			longest = max(longest, current)
+			lastMatch = i
+			qi++
+		}
+	}
+	if qi < len(lq) {
+		return 0, false
+	}
+	span := last - first
+	tier := 1
+	if strings.Contains(ls, lq) {
+		tier = 0
+		// Contiguous match: longestRun and span are determined by len(lq).
+		longest = len(lq)
+		span = len(lq) - 1
+	}
+	// Encode (tier, -longestRun, span, len(s)) into a single comparable int.
+	// The caps below are loose upper bounds; paths are bounded by the walk.
+	const (
+		spanRange = 1 << 16
+		runRange  = 1 << 12
+		lenRange  = 1 << 16
+	)
+	return tier*runRange*spanRange*lenRange +
+		(runRange-1-min(longest, runRange-1))*spanRange*lenRange +
+		min(span, spanRange-1)*lenRange +
+		min(len(ls), lenRange-1), true
 }
 
 func (h *fileHandler) serveDirIndex(w http.ResponseWriter, r *http.Request, fsPath, urlPath string) {
