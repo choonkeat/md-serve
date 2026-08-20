@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -850,5 +852,50 @@ func TestShouldPrettyLinkCaching(t *testing.T) {
 		if got := shouldPrettyLink(c.name); got != c.want {
 			t.Errorf("shouldPrettyLink(%q) = %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// The listing carries machine-readable sort keys on every row — lowercased
+// name, byte count, and modification time as UTC epoch millis — so the client
+// script can re-sort any column and re-render "Modified" in the reader's own
+// timezone without re-parsing the human-readable cells. Directories get
+// size -1 so they group above files in a size sort.
+func TestListingSortKeysAndHeaders(t *testing.T) {
+	h := newTestHandler(t, map[string]string{
+		"docs/a.md": "# a\n",
+		"big.txt":   strings.Repeat("x", 2048),
+		"small.txt": "hi\n",
+	})
+
+	listing := roundTrip(t, h, "/?listing=1", "text/html").Body.String()
+	for _, want := range []string{
+		`<th data-md-sort="name"`,
+		`data-md-sort="size"`,
+		`data-md-sort="mtime"`,
+		`data-md-name="big.txt" data-md-size="2048"`,
+		`data-md-name="docs" data-md-size="-1"`,
+		`<td data-md-modified>`,
+	} {
+		if !strings.Contains(listing, want) {
+			t.Errorf("listing missing %q\n%s", want, truncate(listing, 800))
+		}
+	}
+
+	// Epoch millis, not the human string, is what the client sorts and
+	// localizes by — make sure it's a plausible non-zero timestamp.
+	m := regexp.MustCompile(`data-md-mtime="(\d+)"`).FindStringSubmatch(listing)
+	if m == nil {
+		t.Fatalf("no data-md-mtime in listing\n%s", truncate(listing, 800))
+	}
+	ms, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil || ms < 1_000_000_000_000 {
+		t.Errorf("data-md-mtime = %q, want epoch millis", m[1])
+	}
+
+	// The "../" row is navigation, not an entry: the client pins it to the
+	// top of every ordering, and marks it as such.
+	sub := roundTrip(t, h, "/docs/?listing=1", "text/html").Body.String()
+	if !strings.Contains(sub, `<tr data-md-parent="1">`) {
+		t.Errorf("subdirectory listing missing pinned parent row\n%s", truncate(sub, 800))
 	}
 }

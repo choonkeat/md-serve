@@ -144,6 +144,8 @@ const chromeDarkRules = `
        is the only piece of chrome whose color isn't already dark-mode
        aware via github-markdown.css. #57606a is invisible on #0d1117. */
     .markdown-body p.md-serve-readme-source { color: #8b949e; }
+    .markdown-body table.md-serve-listing th[data-md-sort]:hover { color: #58a6ff; }
+    .markdown-body table.md-serve-listing .md-serve-sort-ind { color: #8b949e; }
     .markdown-body details.md-serve-files { border-bottom-color: #30363d; }
     .markdown-body details.md-serve-files .md-serve-files-tri,
     .markdown-body details.md-serve-files .md-serve-files-meta { color: #8b949e; }
@@ -221,6 +223,13 @@ var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
   .markdown-body table.md-serve-listing td:first-child { word-break: break-word; }
   .markdown-body table.md-serve-listing th:nth-child(n+2),
   .markdown-body table.md-serve-listing td:nth-child(n+2) { white-space: nowrap; }
+  /* Sortable headers. The whole <th> is the click target; the inner span
+     keeps the arrow glued to the label so a right-aligned column's
+     indicator doesn't drift away from its text. */
+  .markdown-body table.md-serve-listing th[data-md-sort] { cursor: pointer; user-select: none; }
+  .markdown-body table.md-serve-listing th[data-md-sort]:hover { color: #0969da; }
+  .markdown-body table.md-serve-listing .md-serve-sort-label { display: inline-flex; align-items: baseline; gap: 4px; }
+  .markdown-body table.md-serve-listing .md-serve-sort-ind { font-size: 10px; width: 8px; color: #57606a; }
   .markdown-body p.md-serve-readme-source { margin: 16px 0 8px 0; font-size: 13px; color: #57606a; }
   /* Collapsible file list above a rendered README. Not a breadcrumb: a
      <details> disclosure whose summary reads "☰ N files · M folders in dir …
@@ -569,6 +578,107 @@ var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
     label.textContent = DEFAULT_PX + 'px (default)';
   });
   syncFromStored();
+})();
+</script>
+<script>
+/* Directory listing: render Modified in the reader's own timezone, and make
+   every column sortable. The server sends UTC epoch millis (data-md-mtime),
+   raw byte counts (data-md-size) and a lowercased name (data-md-name) on each
+   row, so this never re-parses the human-readable text. Without JavaScript the
+   table still renders, sorted name-ascending with server-local timestamps. */
+(function(){
+  var KEY = 'md-serve-listing-sort';
+  var tables = document.querySelectorAll('table.md-serve-listing');
+  if (!tables.length) return;
+
+  var fmtShort = null, fmtFull = null;
+  try {
+    fmtShort = new Intl.DateTimeFormat(undefined, {year: 'numeric', month: '2-digit',
+      day: '2-digit', hour: '2-digit', minute: '2-digit'});
+    fmtFull = new Intl.DateTimeFormat(undefined, {dateStyle: 'full', timeStyle: 'long'});
+  } catch(e) {}
+
+  function localizeTimes(table){
+    var rows = table.tBodies[0] ? table.tBodies[0].rows : [];
+    for (var i = 0; i < rows.length; i++) {
+      var cell = rows[i].querySelector('[data-md-modified]');
+      var ms = parseInt(rows[i].getAttribute('data-md-mtime') || '0', 10);
+      if (!cell || !ms) continue;
+      var d = new Date(ms);
+      cell.textContent = fmtShort ? fmtShort.format(d) : d.toString();
+      if (fmtFull) cell.title = fmtFull.format(d);
+    }
+  }
+
+  function sortKey(row, col){
+    if (col === 'name') return row.getAttribute('data-md-name') || '';
+    return parseInt(row.getAttribute('data-md-' + col) || '0', 10);
+  }
+
+  /* dir is 1 for ascending, -1 for descending. Folders stay grouped above
+     files in every ordering, and "../" stays pinned to the top: it's
+     navigation, not a listed entry. */
+  function sortTable(table, col, dir){
+    var body = table.tBodies[0];
+    if (!body) return;
+    var all = Array.prototype.slice.call(body.rows);
+    var pinned = [], items = [];
+    for (var i = 0; i < all.length; i++) {
+      (all[i].hasAttribute('data-md-parent') ? pinned : items).push(all[i]);
+    }
+    items.sort(function(a, b){
+      var ad = a.getAttribute('data-md-dir') === '1';
+      var bd = b.getAttribute('data-md-dir') === '1';
+      if (ad !== bd) return ad ? -1 : 1;
+      var ka = sortKey(a, col), kb = sortKey(b, col), r;
+      if (typeof ka === 'string') r = ka < kb ? -1 : (ka > kb ? 1 : 0);
+      else r = ka < kb ? -1 : (ka > kb ? 1 : 0);
+      if (r !== 0) return r * dir;
+      var na = a.getAttribute('data-md-name') || '', nb = b.getAttribute('data-md-name') || '';
+      return na < nb ? -1 : (na > nb ? 1 : 0);
+    });
+    for (var p = 0; p < pinned.length; p++) body.appendChild(pinned[p]);
+    for (var k = 0; k < items.length; k++) body.appendChild(items[k]);
+
+    var ths = table.querySelectorAll('th[data-md-sort]');
+    for (var t = 0; t < ths.length; t++) {
+      var active = ths[t].getAttribute('data-md-sort') === col;
+      var ind = ths[t].querySelector('.md-serve-sort-ind');
+      if (ind) ind.textContent = active ? (dir === 1 ? '▲' : '▼') : '';
+      if (active) ths[t].setAttribute('aria-sort', dir === 1 ? 'ascending' : 'descending');
+      else ths[t].removeAttribute('aria-sort');
+    }
+  }
+
+  /* First click on a column picks the ordering people usually want from it:
+     names A-Z, but biggest files and newest changes first. */
+  function defaultDir(col){ return col === 'name' ? 1 : -1; }
+
+  var state = {col: 'name', dir: 1};
+  try {
+    var saved = (localStorage.getItem(KEY) || '').split(' ');
+    if (saved.length === 2 && /^(name|size|mtime)$/.test(saved[0])) {
+      state = {col: saved[0], dir: saved[1] === '-1' ? -1 : 1};
+    }
+  } catch(e) {}
+
+  function applyAll(){
+    for (var i = 0; i < tables.length; i++) sortTable(tables[i], state.col, state.dir);
+  }
+
+  for (var i = 0; i < tables.length; i++) {
+    localizeTimes(tables[i]);
+    tables[i].addEventListener('click', function(ev){
+      var th = ev.target.closest ? ev.target.closest('th[data-md-sort]') : null;
+      if (!th) return;
+      var col = th.getAttribute('data-md-sort');
+      if (col === state.col) state.dir = -state.dir;
+      else state = {col: col, dir: defaultDir(col)};
+      try { localStorage.setItem(KEY, state.col + ' ' + state.dir); } catch(e) {}
+      applyAll();
+    });
+  }
+  applyAll();
 })();
 </script>
 {{if .LiveReload}}<script>
@@ -997,12 +1107,19 @@ func (h *fileHandler) listingHTML(fsPath, urlPath string) (_ template.HTML, file
 		return entries[i].Name() < entries[j].Name()
 	})
 	var b strings.Builder
+	// Each header carries data-md-sort so the client script knows which key to
+	// order by; each row carries the raw sort keys (byte count, epoch millis)
+	// so sorting never has to parse the human-readable text back out.
 	b.WriteString(`<table class="md-serve-listing">
-<thead><tr><th>Name</th><th style="text-align:right">Size</th><th>Modified</th></tr></thead>
+<thead><tr>` +
+		`<th data-md-sort="name" aria-sort="ascending"><span class="md-serve-sort-label">Name<span class="md-serve-sort-ind"></span></span></th>` +
+		`<th style="text-align:right" data-md-sort="size"><span class="md-serve-sort-label">Size<span class="md-serve-sort-ind"></span></span></th>` +
+		`<th data-md-sort="mtime"><span class="md-serve-sort-label">Modified<span class="md-serve-sort-ind"></span></span></th>` +
+		`</tr></thead>
 <tbody>
 `)
 	if urlPath != "/" {
-		b.WriteString(`<tr><td><a href="../">../</a></td><td></td><td></td></tr>` + "\n")
+		b.WriteString(`<tr data-md-parent="1"><td><a href="../">../</a></td><td></td><td></td></tr>` + "\n")
 	}
 	for _, e := range entries {
 		name := e.Name()
@@ -1018,10 +1135,17 @@ func (h *fileHandler) listingHTML(fsPath, urlPath string) (_ template.HTML, file
 		link := name
 		size := ""
 		modified := ""
+		var sizeKey int64 = -1 // directories sort as -1, before any real size
+		var mtimeKey int64     // epoch millis; 0 when we couldn't stat
 		if info, err := e.Info(); err == nil {
+			// Server-local text is only the no-JavaScript fallback; the
+			// client rewrites this cell into the reader's own timezone
+			// using the epoch millis in data-md-mtime.
 			modified = info.ModTime().Local().Format("2006-01-02 15:04")
+			mtimeKey = info.ModTime().UnixMilli()
 			if !e.IsDir() {
 				size = humanSize(info.Size())
+				sizeKey = info.Size()
 			}
 		}
 		if e.IsDir() {
@@ -1033,8 +1157,19 @@ func (h *fileHandler) listingHTML(fsPath, urlPath string) (_ template.HTML, file
 			// direct URLs / <script src> still get raw bytes.
 			link += "?pretty=1"
 		}
+		dirFlag := "0"
+		if e.IsDir() {
+			dirFlag = "1"
+		}
 		fmt.Fprintf(&b,
-			`<tr><td><a href="%s">%s</a></td><td style="text-align:right">%s</td><td>%s</td></tr>`+"\n",
+			`<tr data-md-dir="%s" data-md-name="%s" data-md-size="%d" data-md-mtime="%d">`+
+				`<td><a href="%s">%s</a></td>`+
+				`<td style="text-align:right">%s</td>`+
+				`<td data-md-modified>%s</td></tr>`+"\n",
+			dirFlag,
+			html.EscapeString(strings.ToLower(name)),
+			sizeKey,
+			mtimeKey,
 			html.EscapeString(link),
 			html.EscapeString(display),
 			html.EscapeString(size),

@@ -85,7 +85,9 @@ md-serve -version
   `?listing=1`) drops you to the bare file listing. Otherwise a plain
   generated listing with **Name / Size / Modified** columns. Appending
   `?listing=1` to any directory URL forces that listing, bypassing
-  `index.html` too.
+  `index.html` too. Click any column header to sort by it (click again to
+  reverse); the choice is remembered across pages. Folders stay grouped
+  above files, and `Modified` is shown in your browser's own timezone.
 - Everything else is served byte-for-byte. That means `.js`, `.css`,
   `.wasm`, `.json`, images, fonts, and the rest all reach the browser
   with their normal MIME types — ES module scripts load, fetch() works,
