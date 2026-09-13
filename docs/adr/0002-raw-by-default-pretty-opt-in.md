@@ -275,3 +275,32 @@ deployment is dev/local serving with no shared cache, and adding the
 header would force CDN re-fetches for the common case where Accept
 doesn't actually change the body. If md-serve grows a production-cache
 deployment story, revisit.
+
+## Update — `?pretty=0` on a directory means the file listing
+
+`?listing=1` already forced a directory's bare file listing past both
+`index.html` and the combined README page. That left two escape hatches
+with the same intent but different spellings: `?pretty=0` for "skip the
+rendered view, give me the plain source" on a file, `?listing=1` for the
+directory equivalent. A reader who learned one had no reason to guess the
+other, and `?pretty=0` on a directory did nothing at all — it was parsed
+in `serveFile`, which directories never reach.
+
+An explicit `?pretty=0` on a directory URL is now a synonym for
+`?listing=1`. One rule covers both: *`pretty=0` gives you the plain
+thing*, where a directory's plain thing is its listing. `?listing=1`
+stays — it's what the **Home** breadcrumb links to, and it reads better
+in a hand-typed URL.
+
+The alias is deliberately query-string-only. `serveFile` also infers
+`pretty=false` from an `Accept` header that excludes HTML (see the
+previous update); routing that inference into `serveDir` would mean every
+`curl` and `fetch` without `text/html` got a file listing instead of the
+site's `index.html` — silently breaking anyone serving a static app. So
+`serveDir` reads `r.URL.Query().Get("pretty")` directly and ignores
+`Accept` entirely.
+
+`?pretty=1` on a directory is *not* given a meaning. It could plausibly
+force the combined README page past an `index.html`, but nobody has asked
+for that, and leaving it inert keeps the default rules the single source
+of truth for what a directory renders.

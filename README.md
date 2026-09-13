@@ -43,7 +43,7 @@ rendering isn't what you want:
 | Append to a URL | What you get |
 | --- | --- |
 | `?listing=1` | The bare file listing for a directory — even when an `index.html` or `README.md` would otherwise take over. This is what the **Home** breadcrumb links to. |
-| `?pretty=0` | The **raw source** of a file that normally renders — e.g. `README.md?pretty=0` or `index.html?pretty=0` returns the bytes as `text/plain` instead of the rendered page. |
+| `?pretty=0` | The **raw source** of a file that normally renders — e.g. `README.md?pretty=0` or `index.html?pretty=0` returns the bytes as `text/plain` instead of the rendered page. On a *directory* URL it's a synonym for `?listing=1`: same rule, "give me the plain thing", applied to a directory. |
 | `?pretty=1` | A **syntax-highlighted** view of a source file, with linkable line numbers (e.g. `main.go?pretty=1#L42`). |
 
 ## Install
@@ -84,8 +84,8 @@ md-serve -version
   `Home / <file>` breadcrumb — the **Home** crumb (a link to
   `?listing=1`) drops you to the bare file listing. Otherwise a plain
   generated listing with **Name / Size / Modified** columns. Appending
-  `?listing=1` to any directory URL forces that listing, bypassing
-  `index.html` too. Click any column header to sort by it (click again to
+  `?listing=1` (or `?pretty=0`) to any directory URL forces that listing,
+  bypassing `index.html` too. Click any column header to sort by it (click again to
   reverse); the choice is remembered across pages. Folders stay grouped
   above files, and `Modified` is shown in your browser's own timezone.
 - Everything else is served byte-for-byte. That means `.js`, `.css`,

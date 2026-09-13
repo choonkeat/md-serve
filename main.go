@@ -735,8 +735,8 @@ func main() {
 		fmt.Fprintf(out, "  • .md / .markdown render as GitHub-styled HTML (GFM, syntax-highlighted code blocks).\n")
 		fmt.Fprintf(out, "  • Directories: index.html wins; otherwise index.md / README.md is rendered\n")
 		fmt.Fprintf(out, "    with a collapsible file list on top; otherwise an auto-generated listing.\n")
-		fmt.Fprintf(out, "    Append ?listing=1 to any directory URL to force the bare file listing\n")
-		fmt.Fprintf(out, "    (bypasses both the combined README page and index.html).\n")
+		fmt.Fprintf(out, "    Append ?listing=1 (or ?pretty=0) to any directory URL to force the bare\n")
+		fmt.Fprintf(out, "    file listing (bypasses both the combined README page and index.html).\n")
 		fmt.Fprintf(out, "  • Everything else is served byte-for-byte (.js, .css, .wasm, .json, images,\n")
 		fmt.Fprintf(out, "    fonts, ...) so ES module scripts and static apps Just Work.\n")
 		fmt.Fprintf(out, "  • Append ?pretty=1 to a source-file URL for a syntax-highlighted view with\n")
@@ -744,7 +744,8 @@ func main() {
 		fmt.Fprintf(out, "    already link source files this way; direct URLs / curl / <script src>\n")
 		fmt.Fprintf(out, "    get raw bytes.\n")
 		fmt.Fprintf(out, "  • Append ?pretty=0 to a markdown or .html URL to fetch the raw source\n")
-		fmt.Fprintf(out, "    instead of the rendered page (Content-Type: text/plain).\n")
+		fmt.Fprintf(out, "    instead of the rendered page (Content-Type: text/plain); on a directory\n")
+		fmt.Fprintf(out, "    URL it means the same thing as ?listing=1.\n")
 		fmt.Fprintf(out, "  • Clients whose Accept header doesn't include text/html (curl -H, fetch\n")
 		fmt.Fprintf(out, "    with Accept: application/json, ...) get raw bytes regardless of pretty.\n")
 		fmt.Fprintf(out, "  • Theme follows the browser's prefers-color-scheme (github light/dark).\n")
@@ -944,9 +945,19 @@ func (h *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 //
 // The ?listing=1 escape hatch forces rule 3 unconditionally, so the reader can
 // always get back to the bare file listing — even in a directory whose
-// index.html would otherwise pass through and hide it entirely.
+// index.html would otherwise pass through and hide it entirely. An explicit
+// ?pretty=0 is a synonym: on a file it means "skip the rendered view, give me
+// the plain source", and a directory's equivalent of plain source is its file
+// listing — one rule to remember instead of two. Only the query string counts
+// here; serveFile also infers pretty=0 from a non-HTML Accept header, and
+// letting that reach directories would swap index.html for a listing under
+// every curl and fetch that omits text/html.
 func (h *fileHandler) serveDir(w http.ResponseWriter, r *http.Request, fsPath, urlPath string) {
 	if b, err := strconv.ParseBool(r.URL.Query().Get("listing")); err == nil && b {
+		h.serveDirIndex(w, r, fsPath, urlPath)
+		return
+	}
+	if b, err := strconv.ParseBool(r.URL.Query().Get("pretty")); err == nil && !b {
 		h.serveDirIndex(w, r, fsPath, urlPath)
 		return
 	}

@@ -437,6 +437,42 @@ func TestListingQueryForcesFileListing(t *testing.T) {
 	}
 }
 
+// On a directory, an explicit ?pretty=0 is a synonym for ?listing=1: "skip the
+// rendered view, give me the plain thing" reads the same way on files and
+// directories. The Accept-header inference that also yields pretty=0 for files
+// must NOT reach directories, or every curl would get a listing instead of the
+// site's index.html.
+func TestPretty0OnDirectoryForcesFileListing(t *testing.T) {
+	h := newTestHandler(t, map[string]string{
+		"README.md":  "# Project\n\nrendered readme body.\n",
+		"index.html": "<h1>Static home</h1>\n",
+		"other.txt":  "hello\n",
+	})
+
+	listing := roundTrip(t, h, "/?pretty=0", "text/html").Body.String()
+	for _, want := range []string{`<table class="md-serve-listing">`, "Index of", "other.txt", "README.md"} {
+		if !strings.Contains(listing, want) {
+			t.Errorf("?pretty=0 missing %q\n%s", want, truncate(listing, 500))
+		}
+	}
+	for _, notWant := range []string{"Static home", "rendered readme body."} {
+		if strings.Contains(listing, notWant) {
+			t.Errorf("?pretty=0 should not contain %q\n%s", notWant, truncate(listing, 500))
+		}
+	}
+
+	// ?pretty=1 leaves the default rules alone: index.html still wins.
+	if body := roundTrip(t, h, "/?pretty=1", "text/html").Body.String(); !strings.Contains(body, "Static home") {
+		t.Errorf("?pretty=1 should keep index.html passthrough\n%s", truncate(body, 500))
+	}
+
+	// A non-HTML Accept header is not an explicit ?pretty=0 — curl still gets
+	// the site's index.html, exactly as before this alias existed.
+	if body := roundTrip(t, h, "/", "application/json").Body.String(); !strings.Contains(body, "Static home") {
+		t.Errorf("non-HTML Accept should keep index.html passthrough\n%s", truncate(body, 500))
+	}
+}
+
 // ----------------------------------------------------------------------------
 // -theme-cookie: pin light/dark from a request cookie (server-side), so a host
 // like swe-swe can make md-serve match its own theme. Unset = follow the
