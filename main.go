@@ -146,6 +146,7 @@ const chromeDarkRules = `
     .markdown-body p.md-serve-readme-source { color: #8b949e; }
     .markdown-body table.md-serve-listing th[data-md-sort]:hover { color: #58a6ff; }
     .markdown-body table.md-serve-listing .md-serve-sort-ind { color: #8b949e; }
+    .markdown-body table.md-serve-listing a.md-serve-page-link { color: #8b949e; }
     .markdown-body details.md-serve-files { border-bottom-color: #30363d; }
     .markdown-body details.md-serve-files .md-serve-files-tri,
     .markdown-body details.md-serve-files .md-serve-files-meta { color: #8b949e; }
@@ -230,6 +231,10 @@ var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
   .markdown-body table.md-serve-listing th[data-md-sort]:hover { color: #0969da; }
   .markdown-body table.md-serve-listing .md-serve-sort-label { display: inline-flex; align-items: baseline; gap: 4px; }
   .markdown-body table.md-serve-listing .md-serve-sort-ind { font-size: 10px; width: 8px; color: #57606a; }
+  /* Right-aligned link to the page of a folder that has an index.html (the
+     folder name itself opens its file list). Comes first in the cell so the
+     float sits on the name's line. */
+  .markdown-body table.md-serve-listing a.md-serve-page-link { float: right; margin-left: 12px; font-size: 12px; line-height: 24px; color: #57606a; }
   .markdown-body p.md-serve-readme-source { margin: 16px 0 8px 0; font-size: 13px; color: #57606a; }
   /* Collapsible file list above a rendered README. Not a breadcrumb: a
      <details> disclosure whose summary reads "☰ N files · M folders in dir …
@@ -1169,18 +1174,27 @@ func (h *fileHandler) listingHTML(fsPath, urlPath string) (_ template.HTML, file
 			link += "?pretty=1"
 		}
 		dirFlag := "0"
+		// A folder with an index.html would open as that page and hide its
+		// files, so from a listing its name keeps browsing (?listing=1) and
+		// a separate link on the right opens the page.
+		pageLink := ""
 		if e.IsDir() {
 			dirFlag = "1"
+			if s, err := os.Stat(filepath.Join(fsPath, name, "index.html")); err == nil && !s.IsDir() {
+				pageLink = fmt.Sprintf(`<a class="md-serve-page-link" href="%s">index.html</a>`, html.EscapeString(link))
+				link += "?listing=1"
+			}
 		}
 		fmt.Fprintf(&b,
 			`<tr data-md-dir="%s" data-md-name="%s" data-md-size="%d" data-md-mtime="%d">`+
-				`<td><a href="%s">%s</a></td>`+
+				`<td>%s<a href="%s">%s</a></td>`+
 				`<td style="text-align:right">%s</td>`+
 				`<td data-md-modified>%s</td></tr>`+"\n",
 			dirFlag,
 			html.EscapeString(strings.ToLower(name)),
 			sizeKey,
 			mtimeKey,
+			pageLink,
 			html.EscapeString(link),
 			html.EscapeString(display),
 			html.EscapeString(size),

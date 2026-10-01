@@ -437,6 +437,30 @@ func TestListingQueryForcesFileListing(t *testing.T) {
 	}
 }
 
+// A folder with an index.html would open as that page and hide its files, so
+// in a listing its name links to ?listing=1 and a separate "index.html" link
+// opens the page. Folders without an index.html keep their plain link.
+func TestListingFolderWithIndexHTMLLinksToListing(t *testing.T) {
+	h := newTestHandler(t, map[string]string{
+		"app/index.html":  "<h1>App</h1>\n",
+		"docs/README.md":  "# Docs\n",
+		"plain/notes.txt": "hi\n",
+	})
+	listing := roundTrip(t, h, "/", "text/html").Body.String()
+	for _, want := range []string{
+		`<a class="md-serve-page-link" href="app/">index.html</a><a href="app/?listing=1">app/</a>`,
+		`<a href="docs/">docs/</a>`,
+		`<a href="plain/">plain/</a>`,
+	} {
+		if !strings.Contains(listing, want) {
+			t.Errorf("listing missing %q\n%s", want, truncate(listing, 2000))
+		}
+	}
+	if n := strings.Count(listing, `class="md-serve-page-link"`); n != 1 {
+		t.Errorf("want 1 page link, got %d\n%s", n, truncate(listing, 2000))
+	}
+}
+
 // On a directory, an explicit ?pretty=0 is a synonym for ?listing=1: "skip the
 // rendered view, give me the plain thing" reads the same way on files and
 // directories. The Accept-header inference that also yields pretty=0 for files

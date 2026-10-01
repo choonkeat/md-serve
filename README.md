@@ -85,7 +85,9 @@ md-serve -version
   `?listing=1`) drops you to the bare file listing. Otherwise a plain
   generated listing with **Name / Size / Modified** columns. Appending
   `?listing=1` (or `?pretty=0`) to any directory URL forces that listing,
-  bypassing `index.html` too. Click any column header to sort by it (click again to
+  bypassing `index.html` too. In a listing, the name of a folder that
+  has an `index.html` opens its file list, and a small **index.html**
+  link on the right of that row opens the page. Click any column header to sort by it (click again to
   reverse); the choice is remembered across pages. Folders stay grouped
   above files, and `Modified` is shown in your browser's own timezone.
 - Everything else is served byte-for-byte. That means `.js`, `.css`,
