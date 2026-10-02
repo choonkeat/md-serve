@@ -233,8 +233,9 @@ var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
   .markdown-body table.md-serve-listing .md-serve-sort-ind { font-size: 10px; width: 8px; color: #57606a; }
   /* Right-aligned link to the page of a folder that has an index.html (the
      folder name itself opens its file list). Comes first in the cell so the
-     float sits on the name's line. */
-  .markdown-body table.md-serve-listing a.md-serve-page-link { float: right; margin-left: 12px; font-size: 12px; line-height: 24px; color: #57606a; }
+     float sits on the name's line. Never broken mid-word: the name column's
+     break-word would otherwise split it ("index.ht" / "ml") on a phone. */
+  .markdown-body table.md-serve-listing a.md-serve-page-link { float: right; margin-left: 12px; font-size: 12px; line-height: 24px; color: #57606a; white-space: nowrap; word-break: normal; }
   .markdown-body p.md-serve-readme-source { margin: 16px 0 8px 0; font-size: 13px; color: #57606a; }
   /* Collapsible file list above a rendered README. Not a breadcrumb: a
      <details> disclosure whose summary reads "☰ N files · M folders in dir …
