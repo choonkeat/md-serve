@@ -146,10 +146,9 @@ const chromeDarkRules = `
     .markdown-body p.md-serve-readme-source { color: #8b949e; }
     .markdown-body table.md-serve-listing th[data-md-sort]:hover { color: #58a6ff; }
     .markdown-body table.md-serve-listing .md-serve-sort-ind { color: #8b949e; }
-    .markdown-body table.md-serve-listing a.md-serve-page-link { color: #8b949e; }
     .markdown-body table.md-serve-listing { --md-l-line: #30363d; --md-l-muted: #8b949e;
       --md-l-pill: #161b22; --md-l-on-bg: #1f2b3a; --md-l-on-line: #1f6feb; --md-l-on-fg: #58a6ff;
-      --md-l-dir: #58a6ff; --md-l-file: #8b949e; --md-l-btn: #0d1117; }
+      --md-l-dir: #58a6ff; --md-l-file: #8b949e; }
     .markdown-body details.md-serve-files { border-bottom-color: #30363d; }
     .markdown-body details.md-serve-files .md-serve-files-tri,
     .markdown-body details.md-serve-files .md-serve-files-meta { color: #8b949e; }
@@ -236,14 +235,15 @@ var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
   .markdown-body table.md-serve-listing .md-serve-sort-ind { font-size: 10px; width: 8px; color: #57606a; }
   /* Right-aligned link to the page of a folder that has an index.html (the
      folder name itself opens its file list). Comes first in the cell so the
-     float sits on the name's line. Never broken mid-word: the name column's
+     float sits on the name's line. Styled as an ordinary link, so it reads
+     as something to click. Never broken mid-word: the name column's
      break-word would otherwise split it ("index.ht" / "ml") on a phone. */
-  .markdown-body table.md-serve-listing a.md-serve-page-link { float: right; margin-left: 12px; font-size: 12px; line-height: 24px; color: #57606a; white-space: nowrap; word-break: normal; }
+  .markdown-body table.md-serve-listing a.md-serve-page-link { float: right; margin-left: 12px; white-space: nowrap; word-break: normal; }
   /* Colors the phone layout below draws with; the dark theme only has to
      override these, not restate the rules. */
   .markdown-body table.md-serve-listing { --md-l-line: #d0d7de; --md-l-muted: #57606a;
     --md-l-pill: #f6f8fa; --md-l-on-bg: #ddf4ff; --md-l-on-line: #54aeff; --md-l-on-fg: #0969da;
-    --md-l-dir: #54aeff; --md-l-file: #8c959f; --md-l-btn: #ffffff; }
+    --md-l-dir: #54aeff; --md-l-file: #8c959f; }
   /* Folder / file / "up" icon and the "3 weeks ago" age are phone-only; wide
      screens keep the plain table with exact timestamps. */
   .markdown-body table.md-serve-listing .md-serve-ico,
@@ -290,11 +290,9 @@ var pageTpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
       --md-l-ico: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1.75 1A1.75 1.75 0 0 0 0 2.75v10.5C0 14.216.784 15 1.75 15h12.5A1.75 1.75 0 0 0 16 13.25v-8.5A1.75 1.75 0 0 0 14.25 3H7.5a.25.25 0 0 1-.2-.1l-.9-1.2C6.07 1.26 5.55 1 5 1H1.75Z'/%3E%3C/svg%3E"); }
     .markdown-body table.md-serve-listing tr[data-md-parent] .md-serve-ico {
       --md-l-ico: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M7.78 12.53a.75.75 0 0 1-1.06 0L2.47 8.28a.75.75 0 0 1 0-1.06l4.25-4.25a.751.751 0 0 1 1.042.018.751.751 0 0 1 .018 1.042L4.81 7h7.44a.75.75 0 0 1 0 1.5H4.81l2.97 2.97a.75.75 0 0 1 0 1.06Z'/%3E%3C/svg%3E"); }
-    /* The index.html link becomes a small button, lifted above the row-wide
-       tap target so it stays separately tappable. */
-    .markdown-body table.md-serve-listing a.md-serve-page-link { position: relative; z-index: 1; font-size: 13px;
-      line-height: 1.35; padding: 4px 8px; margin-top: -3px; border: 1px solid var(--md-l-line); border-radius: 6px;
-      background: var(--md-l-btn); color: var(--md-l-muted); }
+    /* The index.html link is lifted above the row-wide tap target so it
+       stays separately tappable. */
+    .markdown-body table.md-serve-listing a.md-serve-page-link { position: relative; z-index: 1; }
     .markdown-body details.md-serve-files table.md-serve-listing { margin-bottom: -12px; }
     .markdown-body details.md-serve-files table.md-serve-listing tbody tr:last-child { border-bottom: 0; }
   }
